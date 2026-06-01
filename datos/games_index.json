@@ -1,0 +1,93 @@
+{
+    "party animals": {
+        "ruta": "D:\\SteamLibrary\\steamapps\\appmanifest_1260320.acf",
+        "appid": "1260320",
+        "tipo": "steam",
+        "exe_name": "Party Animals",
+        "oculto": false
+    },
+    "marvels spider man remastered": {
+        "ruta": "D:\\SteamLibrary\\steamapps\\appmanifest_1817070.acf",
+        "appid": "1817070",
+        "tipo": "steam",
+        "exe_name": "Marvel's Spider-Man Remastered",
+        "oculto": false
+    },
+    "the farmer was replaced": {
+        "ruta": "D:\\SteamLibrary\\steamapps\\appmanifest_2060160.acf",
+        "appid": "2060160",
+        "tipo": "steam",
+        "exe_name": "The Farmer Was Replaced",
+        "oculto": false
+    },
+    "marvels spider man 2": {
+        "ruta": "D:\\SteamLibrary\\steamapps\\appmanifest_2651280.acf",
+        "appid": "2651280",
+        "tipo": "steam",
+        "exe_name": "Marvel's Spider-Man 2",
+        "oculto": false
+    },
+    "brawlhalla": {
+        "ruta": "D:\\SteamLibrary\\steamapps\\appmanifest_291550.acf",
+        "appid": "291550",
+        "tipo": "steam",
+        "exe_name": "Brawlhalla",
+        "oculto": false
+    },
+    "grand theft auto v enhanced": {
+        "ruta": "D:\\SteamLibrary\\steamapps\\appmanifest_3240220.acf",
+        "appid": "3240220",
+        "tipo": "steam",
+        "exe_name": "Grand Theft Auto V Enhanced",
+        "oculto": false
+    },
+    "transformice": {
+        "ruta": "D:\\SteamLibrary\\steamapps\\appmanifest_335240.acf",
+        "appid": "335240",
+        "tipo": "steam",
+        "exe_name": "Transformice",
+        "oculto": false
+    },
+    "stellar blade": {
+        "ruta": "D:\\SteamLibrary\\steamapps\\appmanifest_3489700.acf",
+        "appid": "3489700",
+        "tipo": "steam",
+        "exe_name": "StellarBlade",
+        "oculto": false
+    },
+    "peak": {
+        "ruta": "D:\\SteamLibrary\\steamapps\\appmanifest_3527290.acf",
+        "appid": "3527290",
+        "tipo": "steam",
+        "exe_name": "PEAK",
+        "oculto": false
+    },
+    "astroneer": {
+        "ruta": "D:\\SteamLibrary\\steamapps\\appmanifest_361420.acf",
+        "appid": "361420",
+        "tipo": "steam",
+        "exe_name": "ASTRONEER",
+        "oculto": false
+    },
+    "dead by daylight": {
+        "ruta": "D:\\SteamLibrary\\steamapps\\appmanifest_381210.acf",
+        "appid": "381210",
+        "tipo": "steam",
+        "exe_name": "Dead by Daylight",
+        "oculto": false
+    },
+    "wallpaper engine": {
+        "ruta": "D:\\SteamLibrary\\steamapps\\appmanifest_431960.acf",
+        "appid": "431960",
+        "tipo": "steam",
+        "exe_name": "wallpaper_engine",
+        "oculto": false
+    },
+    "phasmophobia": {
+        "ruta": "D:\\SteamLibrary\\steamapps\\appmanifest_739630.acf",
+        "appid": "739630",
+        "tipo": "steam",
+        "exe_name": "Phasmophobia",
+        "oculto": false
+    }
+}

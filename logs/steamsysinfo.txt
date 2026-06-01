@@ -1,0 +1,16 @@
+
+
+[2026-05-19 19:09:08] Client version: no bootstrapper found
+[2026-05-19 19:09:08] Invalid query parameter
+
+
+[2026-05-19 19:10:12] Client version: no bootstrapper found
+[2026-05-19 19:10:12] Invalid query parameter
+
+
+[2026-05-19 19:11:25] Client version: no bootstrapper found
+[2026-05-19 19:11:25] Invalid query parameter
+
+
+[2026-05-21 17:06:50] Client version: no bootstrapper found
+[2026-05-21 17:06:50] Invalid query parameter

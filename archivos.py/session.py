@@ -1,0 +1,5 @@
+sesion = {
+
+    "activa": False
+
+}
