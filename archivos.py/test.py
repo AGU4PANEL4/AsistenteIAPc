@@ -1,3 +1,8 @@
-from acciones import *
+import asyncio
+import edge_tts
 
-debug_lunar_java()
+async def test():
+    communicate = edge_tts.Communicate("Hola, soy tu asistente", voice="es-CO-SalomeNeural")
+    await communicate.save("test.mp3")
+
+asyncio.run(test())
