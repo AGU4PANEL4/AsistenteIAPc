@@ -4,8 +4,10 @@ import requests
 import time
 import tempfile
 import os
+import threading
 
 from config import MODELO_OLLAMA
+from logger import log
 
 # =========================================================
 # VERIFICAR
@@ -80,9 +82,11 @@ def instalar_ollama():
 
     except requests.Timeout:
         print("Error: timeout descargando Ollama")
+        log.error("Timeout descargando el instalador de Ollama")
         return False
     except Exception as e:
         print("Error instalando Ollama:", e)
+        log.exception("Error instalando Ollama")
         return False
 
 # =========================================================
@@ -113,6 +117,7 @@ def esperar_instalacion_ollama():
         time.sleep(2)
 
     print("Timeout esperando instalación.")
+    log.error("Timeout esperando a que se completara la instalación de Ollama")
     return False
 
 # =========================================================
@@ -134,6 +139,7 @@ def iniciar_ollama():
         )
     except Exception as e:
         print("Error iniciando Ollama:", e)
+        log.exception("Error iniciando Ollama (sin esto, no hay respaldo de IA sin internet)")
         return False
 
     for i in range(30):
@@ -143,6 +149,67 @@ def iniciar_ollama():
         time.sleep(1)
 
     print("Timeout iniciando Ollama.")
+    log.error("Timeout iniciando Ollama (sin esto, no hay respaldo de IA sin internet)")
+    return False
+
+# =========================================================
+# DETENER OLLAMA
+# NUEVO: parte del modo híbrido de IA (ver ia.py) — mientras hay
+# internet, se usa Groq en la nube en vez de Ollama local, y Ollama
+# se detiene por completo para no dejar el proceso "llama-server"
+# consumiendo GPU de fondo (problema real reportado: 40-70% de GPU
+# sostenido incluso con el modelo en reposo, sin generar nada — un
+# bug conocido de Ollama, no el comportamiento esperado).
+#
+# "ollama serve" no tiene un comando de apagado en su propia CLI, así
+# que se mata el proceso directamente por nombre — es el mecanismo
+# estándar para detener este tipo de servicio en Windows cuando no
+# hay una API de apagado expuesta.
+# =========================================================
+
+def ollama_detenido():
+    """True si NINGÚN proceso de ollama está corriendo."""
+    return not ollama_ejecutandose()
+
+
+def detener_ollama():
+    if ollama_detenido():
+        return True
+
+    try:
+        print("Deteniendo Ollama...")
+        # /IM ollama.exe cierra el proceso principal; /T también
+        # cierra cualquier proceso hijo (como el propio llama-server,
+        # que Ollama lanza como subproceso) — /F fuerza el cierre sin
+        # pedir confirmación, necesario porque ollama.exe normalmente
+        # no responde a un cierre "amable" al no tener ventana.
+        subprocess.run(
+            ["taskkill", "/IM", "ollama.exe", "/T", "/F"],
+            capture_output=True,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        # llama-server.exe puede quedar corriendo como proceso
+        # separado incluso después de matar ollama.exe en algunas
+        # versiones — se mata explícitamente también, por seguridad.
+        subprocess.run(
+            ["taskkill", "/IM", "llama-server.exe", "/T", "/F"],
+            capture_output=True,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+    except Exception as e:
+        print("Error deteniendo Ollama:", e)
+        log.exception("Error deteniendo Ollama (puede quedar consumiendo GPU de fondo)")
+        return False
+
+    for i in range(10):
+        if ollama_detenido():
+            print("Ollama detenido.")
+            return True
+        time.sleep(1)
+
+    print("Timeout deteniendo Ollama.")
+    log.error("Timeout deteniendo Ollama — el proceso puede haber quedado "
+              "corriendo, consumiendo GPU de fondo sin necesidad")
     return False
 
 # =========================================================
@@ -172,9 +239,79 @@ def instalar_modelo():
 
     except Exception as e:
         print(f"Error instalando {MODELO_OLLAMA}:", e)
+        log.exception(f"Error instalando el modelo {MODELO_OLLAMA} en Ollama")
         return False
 
-    return modelo_instalado()
+    exito = modelo_instalado()
+
+    if not exito:
+        # FIX/NUEVO: el subprocess pudo terminar sin lanzar ninguna
+        # excepción (returncode != 0 pero sin error de Python) y aun
+        # así no haber instalado el modelo de verdad — sin este log,
+        # ese caso pasaba completamente desapercibido en el archivo
+        # de log (solo el texto del progreso quedaba en consola, y
+        # nada indicaba que al final el modelo NO quedó instalado).
+        log.error(f"ollama pull para {MODELO_OLLAMA} terminó sin errores de "
+                  f"Python, pero el modelo no quedó instalado")
+
+    return exito
+
+# =========================================================
+# PRECALENTAR MODELO
+# NUEVO: aunque keep_alive=-1 (ver ia.py) evita que el modelo se
+# descargue de memoria DESPUÉS de la primera vez que se usa, el
+# costo de la PRIMERA carga sigue existiendo siempre — alguna vez
+# hay que pagarlo. Sin esto, ese costo lo paga el primer comando
+# real del usuario (el primer "abre discord" del día tarda varios
+# segundos más de lo normal, sin razón aparente para quien no sabe
+# de esto).
+#
+# La solución estándar es un "warm-up request": mandar una petición
+# mínima al modelo apenas arranca el asistente, ANTES de que el
+# usuario diga nada, para que cuando llegue el primer comando real,
+# el modelo ya esté cargado en memoria.
+#
+# Esto corre en un hilo daemon aparte y NO bloquea el arranque del
+# asistente — main.py puede decir "Asistente listo" y empezar a
+# escuchar de inmediato, mientras el modelo se calienta en
+# background. Si el precalentamiento tarda, el usuario simplemente
+# no nota nada raro; si el primer comando real llega ANTES de que
+# el precalentamiento termine, ese comando paga el costo de carga
+# de todas formas (no hay forma de evitar eso sin bloquear el
+# arranque, lo cual sería peor) — pero en la práctica, hay varios
+# segundos de margen entre "Asistente listo" y que el usuario
+# diga el wake word y luego un comando, así que casi siempre el
+# precalentamiento ya terminó para entonces.
+# =========================================================
+
+def _precalentar_modelo():
+    try:
+        import ollama
+        cliente = ollama.Client(timeout=60)
+
+        print("[IA] Precalentando modelo en segundo plano...")
+        inicio = time.time()
+
+        cliente.chat(
+            model=MODELO_OLLAMA,
+            messages=[{"role": "user", "content": "hola"}],
+            options={"num_predict": 1},
+            keep_alive=-1,
+        )
+
+        print(f"[IA] Modelo precalentado en {time.time() - inicio:.1f}s")
+
+    except Exception as e:
+        # si esto falla, no es crítico — el modelo simplemente se
+        # cargará en frío con el primer comando real, como pasaba
+        # antes de este cambio. No vale la pena interrumpir el
+        # arranque del asistente por esto.
+        print("[IA] No se pudo precalentar el modelo:", e)
+
+
+def precalentar_modelo_en_segundo_plano():
+    """Llamar después de preparar_ia(), una sola vez al arrancar."""
+    threading.Thread(target=_precalentar_modelo, daemon=True).start()
 
 # =========================================================
 # PREPARAR IA

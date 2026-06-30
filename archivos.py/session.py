@@ -5,27 +5,45 @@ sesion = {
 
 # =========================================================
 # PALABRAS DE CANCELACIÓN
+# FIX: antes "para" y "parar" estaban en esta lista y se
+# comparaban con `in` (substring) contra el texto completo.
+# Esto causaba que frases como "para la música" o "para el
+# video" (que deberían pausar el reproductor, ver PAUSAR en
+# intents.py) se interpretaran como cancelación de sesión,
+# porque "para" aparecía dentro del texto sin importar el
+# contexto. Se quitó "para" de esta lista por ser demasiado
+# ambigua en español (normalmente es preposición, no el verbo
+# "parar"), y además ahora se compara por PALABRA COMPLETA
+# (split + intersección) en vez de substring, para que frases
+# como "detente un momento" no disparen falsos positivos por
+# contener una palabra parecida a otra de la lista.
 # =========================================================
 
 PALABRAS_CANCELAR = {
     "cancela",
     "cancelar",
-    "para",
-    "parar",
     "detente",
     "stop",
     "olvídalo",
     "olvidalo",
-    "no importa",
     "déjalo",
     "dejalo",
+}
+
+FRASES_CANCELAR = {
+    "no importa",
 }
 
 def es_cancelacion(texto):
     if not texto:
         return False
     texto = texto.lower().strip()
-    return any(p in texto for p in PALABRAS_CANCELAR)
+
+    if any(frase in texto for frase in FRASES_CANCELAR):
+        return True
+
+    palabras = set(texto.split())
+    return bool(palabras & PALABRAS_CANCELAR)
 
 # =========================================================
 # DESPEDIDA / FIN DE SESIÓN

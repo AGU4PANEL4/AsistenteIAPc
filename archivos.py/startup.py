@@ -2,9 +2,104 @@ import os
 import sys
 import subprocess
 import tempfile
+import ctypes
 from pathlib import Path
+from logger import log
 
 NOMBRE_ASISTENTE = "AsistenteIA"
+
+# =========================================================
+# PERMISOS DE ADMINISTRADOR
+# FIX/NUEVO: la tarea programada se crea con
+# <RunLevel>HighestAvailable</RunLevel> (necesario para que el
+# asistente pueda cerrar procesos elevados). Windows EXIGE que quien
+# registre una tarea con privilegios elevados sea, a su vez, un
+# proceso elevado — si el asistente corre como usuario normal (el
+# caso de uso típico, sin "Ejecutar como administrador"), schtasks
+# /Create devuelve literalmente "ERROR: Acceso denegado." y antes
+# esto se traducía en el mensaje genérico "No pude activar el inicio
+# automático", sin que el usuario entendiera por qué.
+#
+# _es_admin() detecta esta situación, y _ejecutar_elevado() dispara
+# el cuadro de UAC de Windows SOLO para el comando puntual de
+# schtasks (no para todo el asistente) — el usuario ve el típico
+# "¿Permitir que esta app haga cambios?", lo acepta una vez, y la
+# tarea queda registrada sin tener que cerrar y reabrir el asistente
+# como administrador.
+# =========================================================
+
+def _es_admin():
+    try:
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+
+def _ejecutar_elevado(comando, argumentos_lista, timeout_segundos=90):
+    """
+    Ejecuta `comando` con privilegios de administrador (vía el cuadro
+    de UAC de Windows) y espera a que termine. Devuelve True si el
+    proceso terminó con código de salida 0 (éxito), False si el
+    usuario rechazó el UAC, no respondió a tiempo, o el comando falló
+    por cualquier otro motivo.
+
+    Se usa Start-Process -Verb RunAs de PowerShell (el mecanismo
+    estándar para elevar un comando puntual sin elevar el proceso
+    que lo invoca) en vez de re-lanzar el asistente completo como
+    administrador, que sería mucho más invasivo para algo que el
+    usuario solo necesita confirmar una vez.
+
+    FIX/NUEVO: la primera versión de esto usaba "-Wait" (espera
+    indefinida) — si el cuadro de UAC quedaba oculto detrás de otra
+    ventana o nadie lo confirmaba, este comando (y por lo tanto la
+    acción de voz completa, ej. "activa el inicio automático") se
+    quedaba colgado para siempre, sin ningún aviso de que el
+    asistente seguía "vivo" esperando una confirmación invisible.
+    Ahora se usa WaitForExit(ms) con un timeout explícito — si nadie
+    confirma a tiempo, se intenta matar el proceso elevado y se
+    devuelve False, dejando que quien llama lo reporte como un fallo
+    normal en vez de quedarse esperando indefinidamente.
+    """
+    try:
+        # cada argumento se pasa entre comillas simples para que
+        # PowerShell no los separe en espacios — necesario porque la
+        # ruta del XML temporal casi siempre tiene espacios
+        # (ej. "C:\Users\Nombre Con Espacio\...")
+        argumentos_ps  = ",".join(f"'{a}'" for a in argumentos_lista)
+        timeout_ms     = int(timeout_segundos * 1000)
+
+        resultado = subprocess.run(
+            [
+                "powershell", "-WindowStyle", "Hidden", "-Command",
+                f"$p = Start-Process -FilePath '{comando}' "
+                f"-ArgumentList {argumentos_ps} -Verb RunAs -PassThru; "
+                f"if (-not $p.WaitForExit({timeout_ms})) {{ "
+                f"try {{ $p.Kill() }} catch {{}}; exit 1 }}; "
+                f"exit $p.ExitCode"
+            ],
+            capture_output=True,
+            text=True,
+            # margen extra sobre el timeout interno de PowerShell,
+            # por si quedara colgado por algún motivo ajeno a la
+            # lógica de WaitForExit (ej. el propio powershell.exe)
+            timeout=timeout_segundos + 10,
+        )
+        return resultado.returncode == 0
+    except subprocess.TimeoutExpired:
+        print(f"[Startup] No se confirmó el permiso de administrador "
+              f"en {timeout_segundos}s, se cancela la acción.")
+        # warning, no error: rechazar o ignorar el UAC es una decisión
+        # válida del usuario, no un bug — pero vale la pena que quede
+        # registrado, porque explica por qué una acción (activar o
+        # desactivar el inicio automático) no se completó, sin que
+        # haya ningún traceback ni error de Python de por medio.
+        log.warning(f"UAC no confirmado en {timeout_segundos}s para "
+                    f"'{comando} {' '.join(argumentos_lista)}'")
+        return False
+    except Exception as e:
+        print("[Startup] Error ejecutando elevado:", e)
+        log.exception(f"Error ejecutando elevado: {comando} {argumentos_lista}")
+        return False
 
 # =========================================================
 # RUTAS
@@ -95,25 +190,58 @@ def activar_inicio_automatico():
         ruta_xml = Path(tempfile.gettempdir()) / "AsistenteIA_tarea.xml"
         ruta_xml.write_text(xml_tarea, encoding="utf-16")
 
-        # registrar la tarea (requiere admin UNA sola vez)
-        resultado = subprocess.run(
-            ["schtasks", "/Create", "/TN", nombre_tarea,
-             "/XML", str(ruta_xml), "/F"],
-            capture_output=True,
-            text=True
-        )
+        # registrar la tarea (requiere admin)
+        # FIX: antes esto llamaba a schtasks DIRECTO sin importar si
+        # el proceso actual tenía permisos de admin — si no los
+        # tenía (el caso normal), fallaba con "Acceso denegado" en
+        # silencio (solo visible en consola) y nunca se lograba
+        # activar el inicio automático. Ahora, si no hay permisos de
+        # admin, se ejecuta el mismo comando pero elevado vía UAC
+        # (ver _ejecutar_elevado arriba) — el usuario ve el cuadro de
+        # Windows, lo acepta, y listo, sin tener que reabrir todo el
+        # asistente como administrador.
+        argumentos_schtasks = ["/Create", "/TN", nombre_tarea, "/XML", str(ruta_xml), "/F"]
+
+        if _es_admin():
+            resultado = subprocess.run(
+                ["schtasks", *argumentos_schtasks],
+                capture_output=True,
+                text=True
+            )
+            exito = resultado.returncode == 0
+            if not exito:
+                print("[Startup] Error:", resultado.stderr)
+                # FIX/NUEVO: este es exactamente el caso de "Acceso
+                # denegado" que antes no quedaba en ningún lado fuera
+                # de la consola — registrar el stderr real de schtasks
+                # (no solo "no se pudo") es justamente "el fallo y la
+                # causa", útil para diagnosticar sin tener que pedirle
+                # al usuario que vuelva a reproducirlo con la consola
+                # abierta.
+                log.error(f"schtasks /Create falló (corriendo ya como "
+                          f"admin): {resultado.stderr.strip()}")
+        else:
+            print("[Startup] Se necesitan permisos de administrador — "
+                  "debería aparecer un cuadro de Windows para confirmarlo.")
+            exito = _ejecutar_elevado("schtasks", argumentos_schtasks)
+            if not exito:
+                print("[Startup] No se completó la elevación (¿se rechazó "
+                      "el cuadro de Windows, o tardó más de lo esperado?)")
+                log.error("No se pudo crear la tarea programada de inicio "
+                          "automático: la elevación por UAC no se completó "
+                          "(rechazada, o tardó más de lo esperado)")
 
         ruta_xml.unlink(missing_ok=True)
 
-        if resultado.returncode == 0:
+        if exito:
             print(f"[Startup] Tarea programada creada: {nombre_tarea}")
             return True
         else:
-            print("[Startup] Error:", resultado.stderr)
             return False
 
     except Exception as e:
         print("Error activando startup:", e)
+        log.exception("Error activando el inicio automático")
         return False
 
 # =========================================================
@@ -122,14 +250,22 @@ def activar_inicio_automatico():
 
 def desactivar_inicio_automatico():
     try:
-        subprocess.run(
-            ["schtasks", "/Delete", "/TN", "AsistenteIA", "/F"],
-            capture_output=True
-        )
+        # FIX: misma razón que en activar_inicio_automatico() — borrar
+        # una tarea registrada con privilegios elevados también puede
+        # requerir permisos de admin. Si no los hay, se eleva igual
+        # vía UAC en vez de fallar en silencio.
+        argumentos = ["/Delete", "/TN", "AsistenteIA", "/F"]
+
+        if _es_admin():
+            subprocess.run(["schtasks", *argumentos], capture_output=True)
+        else:
+            _ejecutar_elevado("schtasks", argumentos)
+
         print("[Startup] Tarea programada eliminada")
         return True
     except Exception as e:
         print("Error desactivando startup:", e)
+        log.exception("Error desactivando el inicio automático")
         return False
 
 # =========================================================

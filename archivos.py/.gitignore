@@ -1,4 +1,81 @@
+# =========================================================
+# PYTHON
+# =========================================================
+
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+
+# entornos virtuales
 .venv/
+venv/
+env/
+
+# variables de entorno locales
 .env
+
+# =========================================================
+# DATOS DEL ASISTENTE (NUNCA subir al repo)
+# Estos archivos viven en %LOCALAPPDATA%\AsistenteIA\ en
+# tiempo de ejecución, pero por si alguien los copia a la
+# carpeta del proyecto accidentalmente.
+# =========================================================
+
+# configuración local — contiene la GROQ_API_KEY en texto plano
+config.json
+
+# datos de usuario — aliases, recordatorios, temporizadores,
+# memoria y logs son específicos de cada instalación
+aliases.json
+memoria.json
+recordatorios.json
+temporizadores.json
+apps_no_encontradas.txt
+*.log
+*.log.*
+
+# =========================================================
+# PYINSTALLER
+# =========================================================
+
+# carpetas generadas por PyInstaller / empaquetar.ps1
+build/
+dist/
+*.spec.bak
+
+# archivo temporal del instalador de Inno Setup
+AsistenteIA_tarea.xml
+
+# =========================================================
+# MODELOS WHISPER (faster-whisper los descarga automáticamente)
+# Son pesados (~75MB–488MB) y se regeneran solos al primer uso
+# =========================================================
+
+# caché de Hugging Face / faster-whisper
+.cache/
+models/
+whisper_cache/
+
+# =========================================================
+# EDITORES / IDEs
+# =========================================================
+
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+Thumbs.db
+.DS_Store
+
+# =========================================================
+# INSTALADOR GENERADO
+# El .exe generado por Inno Setup no va al repo — se
+# distribuye por otro medio (releases, Drive, etc.)
+# =========================================================
+
+Output/
+*.exe
+!# excepción: si algún día agregás un .exe de dependencia
+!# pequeña al repo a propósito, podés usar "!nombre.exe" acá

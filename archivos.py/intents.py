@@ -1,6 +1,6 @@
 import re
 from aliases import traducir_alias
-from memory import memoria
+from memory import memoria, obtener_historial
 
 # =========================================================
 # NORMALIZAR
@@ -24,6 +24,32 @@ CORRECCIONES = {
 
 def normalizar(comando):
     comando = comando.lower().strip()
+
+    # FIX: Whisper a veces inserta una coma cuando el usuario hace una
+    # pausa breve y natural entre la acción y el nombre de la app (ej.
+    # "abre... discord" se transcribe como "abre, discord"). Esa coma
+    # rompía TODAS las reglas de coincidencia por prefijo de este
+    # archivo (comando.startswith("abre ") falla si después de "abre"
+    # viene una coma en vez de un espacio directo), mandando el
+    # comando a la IA innecesariamente — más lento y menos confiable
+    # para algo tan simple como una app conocida.
+    #
+    # Se quitan también signos de exclamación/interrogación de
+    # apertura y cierre por el mismo motivo (ya vistos en
+    # transcripciones reales como "¡habré bravujala!"). No se toca
+    # nada más de la puntuación a propósito, para no arriesgar romper
+    # texto legítimo dentro de nombres de apps o alias.
+    # FIX: la coma se reemplaza por un ESPACIO, no se elimina sin
+    # reemplazo — si no, "abre,discord" (sin espacio después de la
+    # coma, que también puede pasar) quedaría pegado como
+    # "abrediscord" en vez de separarse correctamente en "abre
+    # discord". Los signos de exclamación/interrogación sí se pueden
+    # eliminar sin reemplazo porque nunca actúan como separador de
+    # palabras en el texto transcrito.
+    comando = comando.replace(",", " ")
+    comando = re.sub(r"[¡!¿?]", "", comando)
+    comando = re.sub(r"\s+", " ", comando).strip()
+
     for error, correcto in CORRECCIONES.items():
         if error in comando:
             comando = comando.replace(error, correcto)
@@ -143,6 +169,55 @@ def detectar_intent(comando):
             return "maximizar_app", ultima
 
     # =====================================================
+    # "LA ANTERIOR" / "OTRA VEZ" — usando el historial corto
+    # NUEVO: a diferencia de ÁBRELO/CIÉRRALO (que se refieren a la
+    # app MÁS reciente, índice 0 del historial — mismo dato que
+    # ultima_app), "la anterior" se refiere a la PREVIA a esa, índice
+    # 1. Por ejemplo: abriste Discord, luego Brawlhalla, y decís
+    # "abre la anterior" — te referís a Discord, no a Brawlhalla (que
+    # ya está abierta y sería redundante volver a pedirla así).
+    #
+    # "otra vez" / "de nuevo" (sin "ábrelo" antes) también se manejan
+    # acá como sinónimos de abrir/cerrar la MÁS reciente del
+    # historial — funcionan igual que ÁBRELO/CIÉRRALO arriba, pero
+    # cubren frases que el usuario diría de forma más natural en
+    # una conversación ya en curso ("vuelve a abrirlo" ya estaba
+    # cubierto por normalizar(), pero "ábrelo otra vez" o "otra vez
+    # brawlhalla" no necesariamente).
+    # =====================================================
+
+    ABRIR_LA_ANTERIOR = {
+        "abre la anterior", "abre el anterior",
+        "la anterior", "el anterior",
+        "abre la app anterior",
+    }
+
+    CERRAR_LA_ANTERIOR = {
+        "cierra la anterior", "cierra el anterior",
+        "cierra la app anterior",
+    }
+
+    if comando in ABRIR_LA_ANTERIOR:
+        historial_abrir = obtener_historial("abrir_app")
+        if len(historial_abrir) >= 2:
+            return "abrir_app", historial_abrir[1]
+        # FIX: sin esto, si no hay suficiente historial, el flujo
+        # seguía de largo y una regla genérica más abajo ("abre " +
+        # resto del texto) trataba "la anterior" como si fuera el
+        # nombre literal de una app, terminando en un confuso "no
+        # encontré la anterior". Como ya sabemos que esta frase es
+        # una referencia al historial, no un nombre de app, se corta
+        # acá explícitamente — la IA puede manejar mejor explicarle
+        # al usuario que no hay una app anterior registrada todavía.
+        return None, None
+
+    if comando in CERRAR_LA_ANTERIOR:
+        historial_cerrar = obtener_historial("cerrar_app")
+        if len(historial_cerrar) >= 2:
+            return "cerrar_app", historial_cerrar[1]
+        return None, None
+
+    # =====================================================
     # YOUTUBE
     # =====================================================
 
@@ -229,11 +304,231 @@ def detectar_intent(comando):
                 return "recapturar_app", nombre
 
     # =====================================================
+    # RECORDATORIOS
+    # Tres formas de decirlo (orden del tiempo flexible):
+    #   "recuérdame en 10 minutos que llame a mamá"
+    #   "recuérdame a las 3 pm que llame a mamá"
+    #   "recuérdame que llame a mamá a las 3 pm"      (orden inverso)
+    # Se empaqueta como "cuando|que" porque detectar_intent solo
+    # puede devolver un valor — acciones.py lo separa de nuevo.
+    #
+    # FIX: la versión anterior solo reconocía "recuérdame [tiempo]
+    # que [texto]" — si el usuario decía la hora DESPUÉS del texto
+    # ("recuérdame que llame a mamá a las 3 pm", un orden igual de
+    # natural en español), no matcheaba ningún prefijo y cAía a la
+    # IA innecesariamente, que no siempre lo armaba bien tampoco.
+    # Ahora se usa un patrón con regex que reconoce el "que" como
+    # separador en cualquier posición relativa al tiempo.
+    # =====================================================
+
+    VERBOS_RECORDATORIO = (
+        r"recu[ée]rdame|ponme\s+un\s+recordatorio|"
+        r"crea(?:r)?\s+un?\s+recordatorio|crea(?:r)?\s+recordatorio"
+    )
+
+    PATRON_TIEMPO = r"(?:en|a\s+las)\s+([^,]+?)"
+
+    # caso 1: tiempo ANTES del "que" — "recuérdame a las 3 pm que..."
+    m = re.match(
+        rf"^(?:{VERBOS_RECORDATORIO})\s+{PATRON_TIEMPO}\s+que\s+(.+)$",
+        comando
+    )
+
+    # caso 2: tiempo DESPUÉS del "que" — "recuérdame que... a las 3 pm"
+    if not m:
+        m = re.match(
+            rf"^(?:{VERBOS_RECORDATORIO})\s+que\s+(.+?)\s+{PATRON_TIEMPO}$",
+            comando
+        )
+        if m:
+            # en este patrón los grupos vienen invertidos (texto,
+            # tiempo) — se reordenan para que siempre sea (tiempo, texto)
+            que, cuando = m.group(1), m.group(2)
+            m = None
+        else:
+            que = cuando = None
+    else:
+        cuando, que = m.group(1), m.group(2)
+
+    if cuando and que:
+        cuando = cuando.strip()
+        que    = que.strip()
+        if cuando and que:
+            return "crear_recordatorio", f"{cuando}|{que}"
+
+    # caso 3: sin tiempo explícito — "recuérdame que llame a mamá"
+    # (sin info de cuándo en este patrón; se deja caer a la IA, que
+    # puede preguntar o inferir mejor frases libres ambiguas)
+
+    # =====================================================
+    # LISTAR RECORDATORIOS
+    # Frases fijas, sin parámetro — no necesitan prefijo +
+    # resto como las demás reglas.
+    # =====================================================
+
+    LISTAR_RECORDATORIOS = {
+        "qué recordatorios tengo",
+        "que recordatorios tengo",
+        "cuáles son mis recordatorios",
+        "cuales son mis recordatorios",
+        "mis recordatorios",
+        "lista de recordatorios",
+        "tengo algún recordatorio",
+        "tengo algun recordatorio",
+    }
+
+    if comando in LISTAR_RECORDATORIOS:
+        return "listar_recordatorios", "recordatorios"
+
+    # =====================================================
+    # CANCELAR RECORDATORIO
+    # "cancela el recordatorio de la pizza" → palabra_clave="la pizza"
+    # El "de"/"sobre" inicial se quita porque es parte de la
+    # gramática de la frase, no de las palabras clave a buscar.
+    # =====================================================
+
+    CANCELAR_RECORDATORIO_PREFIJOS = [
+        "cancela el recordatorio de ",
+        "cancela el recordatorio sobre ",
+        "cancela mi recordatorio de ",
+        "elimina el recordatorio de ",
+        "borra el recordatorio de ",
+        "quita el recordatorio de ",
+    ]
+
+    for prefijo in CANCELAR_RECORDATORIO_PREFIJOS:
+        if comando.startswith(prefijo):
+            palabra_clave = comando[len(prefijo):].strip()
+            if palabra_clave:
+                return "cancelar_recordatorio", palabra_clave
+
+    # =====================================================
+    # TEMPORIZADORES
+    # Tres formas de decirlo, con o sin nombre:
+    #   "pon un temporizador de 10 minutos"
+    #   "pon un temporizador de pasta a 10 minutos"
+    #   "pon un temporizador de 10 minutos para la pasta"
+    # Se empaqueta como "duración|nombre" (mismo separador que
+    # crear_recordatorio usa "cuando|que") — acciones.py lo separa.
+    # Si no hay nombre, la parte derecha queda vacía.
+    # =====================================================
+
+    TEMPORIZADOR_PREFIJOS = [
+        "pon un temporizador de ", "pon un temporizador a ",
+        "ponme un temporizador de ", "ponme un temporizador a ",
+        "crea un temporizador de ", "crea un temporizador a ",
+        "inicia un temporizador de ", "inicia un temporizador a ",
+        "temporizador de ", "temporizador a ",
+    ]
+
+    for prefijo in TEMPORIZADOR_PREFIJOS:
+        if comando.startswith(prefijo):
+            resto = comando[len(prefijo):].strip()
+
+            if not resto:
+                continue
+
+            duracion = resto
+            nombre   = ""
+
+            # "10 minutos para la pasta" / "10 minutos para pasta"
+            if " para " in resto:
+                duracion, nombre = resto.split(" para ", 1)
+                duracion = duracion.strip()
+                nombre   = nombre.strip()
+
+            # "pasta a 10 minutos" — el nombre viene ANTES, separado
+            # por " a ", y lo que sigue a " a " es la duración. Solo
+            # aplica si "duracion" (== resto completo en este punto)
+            # no tiene ya un número, porque si lo tiene es porque ya
+            # se resolvió arriba con " para ".
+            elif " a " in resto and not re.search(r"\d", resto.split(" a ", 1)[0]):
+                nombre, duracion = resto.split(" a ", 1)
+                nombre   = nombre.strip()
+                duracion = duracion.strip()
+
+            if duracion:
+                return "crear_temporizador", f"{duracion}|{nombre}"
+
+    # =====================================================
+    # LISTAR TEMPORIZADORES
+    # =====================================================
+
+    LISTAR_TEMPORIZADORES = {
+        "qué temporizadores tengo",
+        "que temporizadores tengo",
+        "cuáles son mis temporizadores",
+        "cuales son mis temporizadores",
+        "mis temporizadores",
+        "lista de temporizadores",
+        "tengo algún temporizador",
+        "tengo algun temporizador",
+        "cuánto falta del temporizador",
+        "cuanto falta del temporizador",
+    }
+
+    if comando in LISTAR_TEMPORIZADORES:
+        return "listar_temporizadores", "temporizadores"
+
+    # =====================================================
+    # CANCELAR TEMPORIZADOR
+    # =====================================================
+
+    CANCELAR_TEMPORIZADOR_EXACTO = {
+        "cancela el temporizador",
+        "cancela mi temporizador",
+        "elimina el temporizador",
+        "borra el temporizador",
+        "para el temporizador",
+        "detén el temporizador",
+        "deten el temporizador",
+    }
+
+    if comando in CANCELAR_TEMPORIZADOR_EXACTO:
+        return "cancelar_temporizador", ""
+
+    CANCELAR_TEMPORIZADOR_PREFIJOS = [
+        "cancela el temporizador de ",
+        "cancela mi temporizador de ",
+        "elimina el temporizador de ",
+        "borra el temporizador de ",
+        "quita el temporizador de ",
+    ]
+
+    for prefijo in CANCELAR_TEMPORIZADOR_PREFIJOS:
+        if comando.startswith(prefijo):
+            palabra_clave = comando[len(prefijo):].strip()
+            if palabra_clave:
+                return "cancelar_temporizador", palabra_clave
+
+    # =====================================================
     # ELIMINAR ALIAS
+    # FIX: antes esto exigía que el usuario dijera el alias EXACTO
+    # en el mismo comando ("olvida el alias braulhalla"), comparado
+    # con coincidencia exacta de texto contra lo guardado — si
+    # Whisper transcribía el alias distinto a como se guardó, la
+    # búsqueda fallaba aunque el alias sí existiera.
+    #
+    # Ahora "olvida un alias" / "elimina un alias" dispara un flujo
+    # GUIADO (ver eliminar_alias_guiado en registrar_alias.py): pide
+    # la app, busca con tolerancia, y muestra los alias existentes
+    # para elegir — mucho más resistente a errores de transcripción
+    # porque ya no depende de decir un texto exacto de una sola vez.
+    #
+    # Si el usuario YA dice un nombre después del comando ("olvida
+    # el alias de brawlhalla"), ese nombre se usa como punto de
+    # partida para identificar la app directamente, sin tener que
+    # preguntarlo de nuevo.
     # =====================================================
 
     ELIMINAR_ALIAS = [
-        "olvida ",
+        "olvida el alias de ",
+        "elimina el alias de ",
+        "borra el alias de ",
+        "quita el alias de ",
+        "olvida un alias de ",
+        "elimina un alias de ",
+        "olvida el alias ",
         "elimina el alias ",
         "borra el alias ",
         "elimina alias ",
@@ -246,9 +541,33 @@ def detectar_intent(comando):
             if nombre:
                 return "eliminar_alias", nombre
 
+    ELIMINAR_ALIAS_SIN_NOMBRE = {
+        "olvida un alias", "elimina un alias", "borra un alias",
+        "quita un alias", "elimina alias", "borra alias",
+        "eliminar un alias", "borrar un alias", "olvidar un alias",
+        "eliminar alias", "borrar alias", "olvidar alias",
+        "quitar un alias", "quitar alias", "olvida alias",
+        "elimina aliases", "elimina los alias",
+    }
+
+    if comando in ELIMINAR_ALIAS_SIN_NOMBRE:
+        return "eliminar_alias", ""
+
     # =====================================================
     # MEDIA / REPRODUCCIÓN
     # =====================================================
+
+    # FIX: definida ACÁ, antes de cualquier uso — la necesitan tanto
+    # PAUSAR/REANUDAR como SIGUIENTE/ANTERIOR más abajo, para filtrar
+    # palabras descriptivas genéricas ("canción", "video", "música")
+    # que NO deben tratarse como nombre de una app real cuando
+    # aparecen después de un verbo de acción corto (ver el FIX
+    # detallado más abajo, junto a SIGUIENTE_FIJAS).
+    PALABRAS_GENERICAS_MEDIA = {
+        "canción", "cancion", "video", "track", "pista",
+        "música", "musica", "la canción", "la cancion",
+        "el video", "la pista", "la música", "la musica",
+    }
 
     PAUSAR = [
         "pausa", "pausar", "detén", "deten",
@@ -262,17 +581,62 @@ def detectar_intent(comando):
         "sigue la musica", "sigue el video",
     ]
 
-    SIGUIENTE = [
+    # FIX: antes SIGUIENTE/ANTERIOR mezclaban en una sola lista tanto
+    # frases FIJAS sin app ("siguiente canción", "siguiente video")
+    # como el prefijo corto que sí puede llevar un nombre de app real
+    # ("siguiente spotify"). Como el loop usaba comando.startswith(p)
+    # para CADA entrada de la lista en el orden en que estaba escrita,
+    # y "siguiente" (sin más) aparecía ANTES que "siguiente canción"
+    # en la lista, cualquier comando que empezara con "siguiente "
+    # nunca llegaba a compararse contra las frases más específicas —
+    # se interpretaba "canción"/"video"/"track" como si fueran el
+    # NOMBRE DE LA APP a la que aplicar la acción, resultando en
+    # "No pude pasar de canción en canción".
+    #
+    # Ahora las frases fijas (sin app) se comparan PRIMERO con
+    # igualdad exacta, y solo si ninguna coincide se prueba el
+    # prefijo corto + lo que siga como posible nombre de app — y
+    # ESE resultado se filtra contra PALABRAS_GENERICAS_MEDIA, para
+    # que aunque alguien diga una variante no listada explícitamente
+    # ("siguiente cancion", con o sin tilde, "siguiente pista"), no
+    # termine tratándose como nombre de app de todas formas.
+
+    SIGUIENTE_FIJAS = {
         "siguiente", "siguiente canción", "siguiente cancion",
         "skip", "salta", "salta la canción", "salta la cancion",
-        "siguiente video", "siguiente track",
-    ]
+        "siguiente video", "siguiente track", "siguiente pista",
+    }
 
-    ANTERIOR = [
+    ANTERIOR_FIJAS = {
         "anterior", "canción anterior", "cancion anterior",
         "atrás", "atras", "volver", "video anterior",
-        "track anterior", "la anterior",
-    ]
+        "track anterior", "la anterior", "pista anterior",
+    }
+
+    if comando in SIGUIENTE_FIJAS:
+        return "media_siguiente", "media"
+
+    if comando in ANTERIOR_FIJAS:
+        return "media_anterior", "media"
+
+    PREFIJOS_SIGUIENTE_CORTOS = ["siguiente", "skip", "salta"]
+    PREFIJOS_ANTERIOR_CORTOS  = ["anterior", "atrás", "atras"]
+
+    for p in PREFIJOS_SIGUIENTE_CORTOS:
+        if comando.startswith(p + " "):
+            app = comando[len(p):].strip()
+            if app in PALABRAS_GENERICAS_MEDIA:
+                return "media_siguiente", "media"
+            app = traducir_alias(app) if app else "media"
+            return "media_siguiente", app or "media"
+
+    for p in PREFIJOS_ANTERIOR_CORTOS:
+        if comando.startswith(p + " "):
+            app = comando[len(p):].strip()
+            if app in PALABRAS_GENERICAS_MEDIA:
+                return "media_anterior", "media"
+            app = traducir_alias(app) if app else "media"
+            return "media_anterior", app or "media"
 
     SUBIR_VOLUMEN = [
         "sube el volumen", "sube volumen", "más volumen",
@@ -299,11 +663,17 @@ def detectar_intent(comando):
     # pausar — detectar nombre de app si viene explícito
     # ej: "pausa spotify" → ("media_pausar", "spotify")
     # ej: "pausa" → ("media_pausar", "media")
+    # FIX: mismo problema que tenían SIGUIENTE/ANTERIOR (ver el
+    # comentario más arriba) — "detén la música" capturaba "la
+    # música" como si fuera el nombre de una app. Se filtra contra
+    # PALABRAS_GENERICAS_MEDIA antes de tratar el resto como app.
     for p in PAUSAR:
         if comando == p:
             return "media_pausar", "media"
         if comando.startswith(p + " "):
             app = comando[len(p):].strip()
+            if app in PALABRAS_GENERICAS_MEDIA:
+                return "media_pausar", "media"
             app = traducir_alias(app) if app else "media"
             return "media_pausar", app or "media"
 
@@ -312,24 +682,10 @@ def detectar_intent(comando):
             return "media_reanudar", "media"
         if comando.startswith(p + " "):
             app = comando[len(p):].strip()
+            if app in PALABRAS_GENERICAS_MEDIA:
+                return "media_reanudar", "media"
             app = traducir_alias(app) if app else "media"
             return "media_reanudar", app or "media"
-
-    for p in SIGUIENTE:
-        if comando == p:
-            return "media_siguiente", "media"
-        if comando.startswith(p + " "):
-            app = comando[len(p):].strip()
-            app = traducir_alias(app) if app else "media"
-            return "media_siguiente", app or "media"
-
-    for p in ANTERIOR:
-        if comando == p:
-            return "media_anterior", "media"
-        if comando.startswith(p + " "):
-            app = comando[len(p):].strip()
-            app = traducir_alias(app) if app else "media"
-            return "media_anterior", app or "media"
 
     if comando in SUBIR_VOLUMEN or any(comando.startswith(p + " ") for p in SUBIR_VOLUMEN):
         return "media_subir_volumen", "media"

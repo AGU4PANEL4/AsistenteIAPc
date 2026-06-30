@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -25,6 +26,7 @@ VALORES_DEFECTO = {
     "wake_word":                 "jarvis",
     "pregunta_inicio_realizada": False,
     "inicio_automatico":         False,
+    "groq_api_key":              "",
 }
 
 # =====================================
@@ -80,3 +82,67 @@ WAKE_WORD = cargar_config().get("wake_word", "jarvis")
 # =====================================
 
 MODELO_OLLAMA = "qwen2.5:3b"
+
+# =====================================
+# GROQ (modo híbrido de IA)
+# NUEVO: API en la nube usada cuando hay internet, en vez de Ollama
+# local — ver gestor_ia.py para el detalle completo de por qué.
+#
+# La API key se busca PRIMERO en la variable de entorno
+# GROQ_API_KEY (más seguro — así nunca queda en texto plano en un
+# archivo que podrías subir a GitHub por accidente). Si no está ahí,
+# se busca en config.json (más simple de configurar, pero menos
+# seguro si compartís el proyecto con otros).
+#
+# Para conseguir una key gratis: https://console.groq.com/keys
+#
+# Si no hay ninguna key configurada, el modo híbrido simplemente
+# cae siempre a Ollama local (comportamiento idéntico a como
+# funcionaba antes de este cambio) — no es un error, es el respaldo
+# esperado para quien no quiera configurar Groq.
+# =====================================
+
+_config_actual = cargar_config()
+
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY") or _config_actual.get("groq_api_key", "")
+
+# Modelo rápido y liviano de Groq, adecuado para comandos cortos
+# (action|value, o charla de 1-2 frases) — no necesitamos un modelo
+# grande para esto, y los modelos chicos de Groq responden casi
+# instantáneo.
+MODELO_GROQ = "llama-3.1-8b-instant"
+
+# =====================================
+# GROQ_API_KEY "EN CALIENTE"
+# FIX/NUEVO: GROQ_API_KEY (arriba) se calcula UNA sola vez, en el
+# momento en que este módulo se importa por primera vez. Eso es un
+# problema para setup_groq.py: si el asistente arranca SIN key
+# configurada, ese flujo la pide por consola, la valida, y la guarda
+# en config.json recién DESPUÉS de que config.py ya se importó (y
+# probablemente después de que groq_cliente.py también se haya
+# importado, vía ia.py) — con la constante congelada, groq_cliente.py
+# seguiría viendo GROQ_API_KEY="" para siempre en esa misma ejecución,
+# aunque el archivo en disco ya tenga la key recién guardada.
+#
+# Esta función lee siempre el valor ACTUAL (variable de entorno
+# primero, si no config.json), sin cachear nada — así no importa en
+# qué momento del arranque se configuró la key, ni el orden en que
+# los módulos se importaron entre sí. groq_cliente.py la usa en vez
+# de la constante para esto mismo.
+# =====================================
+
+def obtener_groq_api_key():
+    return os.environ.get("GROQ_API_KEY") or cargar_config().get("groq_api_key", "")
+
+
+def guardar_groq_api_key(key):
+    """
+    Guarda la key en config.json Y la deja disponible de inmediato
+    en esta misma ejecución (variable de entorno del proceso) — así
+    la próxima llamada a obtener_groq_api_key() ya la encuentra, sin
+    necesitar reiniciar el asistente.
+    """
+    data = cargar_config()
+    data["groq_api_key"] = key
+    guardar_config(data)
+    os.environ["GROQ_API_KEY"] = key

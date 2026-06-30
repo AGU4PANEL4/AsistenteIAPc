@@ -140,6 +140,22 @@ def traducir_alias(nombre):
 def listar_aliases():
     return dict(aliases)
 
+
+def alias_por_app(nombre_real):
+    """
+    Devuelve la lista de alias (claves) que apuntan al nombre_real
+    dado, sin distinguir mayúsculas/minúsculas. Usado por el flujo
+    de eliminación guiada: primero se identifica la app, luego se
+    muestran solo SUS alias para elegir cuál borrar — mucho más
+    tolerante a errores de transcripción que pedir el alias exacto
+    de una sola vez.
+    """
+    nombre_real = (nombre_real or "").lower().strip()
+    return [
+        alias for alias, real in aliases.items()
+        if (real or "").lower().strip() == nombre_real
+    ]
+
 # =========================================================
 # CARGAR AL IMPORTAR
 # =========================================================

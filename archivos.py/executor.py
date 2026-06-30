@@ -1,7 +1,8 @@
 from tools import TOOLS
-from memory import memoria, guardar_memoria
+from memory import memoria, guardar_memoria, registrar_accion
 from aliases import *
 from tts import hablar
+from logger import log
 
 
 def ejecutar(intent, valor):
@@ -43,6 +44,20 @@ def ejecutar(intent, valor):
         resultado = TOOLS[intent](nombre_real)
     except Exception as e:
         print("Error ejecutando tool:", e)
+        # FIX/NUEVO: este catch-all es el punto donde un crash real
+        # dentro de CUALQUIER tool (abrir una app, un recordatorio, un
+        # control de media, etc.) termina — antes solo se imprimía en
+        # consola, así que si nadie estaba mirando la ventana en ese
+        # momento, el error se perdía por completo sin dejar ningún
+        # rastro de qué pasó ni por qué. Esto es justamente el tipo de
+        # fallo "importante" que vale la pena que quede en el log: una
+        # acción que el usuario pidió y que el código no pudo
+        # completar por una excepción real, no un simple "no
+        # encontrado" (esos ya se manejan y se le explican al usuario
+        # por voz más abajo, sin necesitar quedar en el log de errores).
+        log.exception(
+            f"Crash ejecutando intent '{intent}' con valor '{nombre_real}'"
+        )
         hablar("Hubo un error ejecutando la acción")
         return False
 
@@ -81,12 +96,39 @@ def ejecutar(intent, valor):
             "media_reanudar":  "No encontré nada para reanudar" + (f" en {objetivo_media}" if objetivo_media else ""),
             "media_siguiente": "No pude pasar de canción" + (f" en {objetivo_media}" if objetivo_media else ""),
             "media_anterior":  "No pude retroceder la canción" + (f" en {objetivo_media}" if objetivo_media else ""),
+            "crear_recordatorio": "No entendí para cuándo quieres el recordatorio",
+            "cancelar_recordatorio": "No pude cancelar ese recordatorio",
+            "crear_temporizador": "No entendí la duración del temporizador",
+            "cancelar_temporizador": "No pude cancelar ese temporizador",
         }
 
-        # FIX: activar_startup/desactivar_startup devuelven su propio
-        # mensaje de error específico en la tupla (nombre_decir) en vez
-        # de un nombre de app — si está presente, se usa tal cual.
-        if intent in ("activar_startup", "desactivar_startup") and nombre_decir:
+        # FIX: activar_startup/desactivar_startup/media_volumen_exacto/
+        # crear_recordatorio/listar_recordatorios/cancelar_recordatorio/
+        # crear_temporizador/listar_temporizadores/cancelar_temporizador
+        # devuelven su propio mensaje específico en la tupla
+        # (nombre_decir) en vez de un nombre de app — si está presente,
+        # se usa tal cual en vez del texto genérico de abajo.
+        intents_con_mensaje_propio = (
+            "activar_startup", "desactivar_startup", "media_volumen_exacto",
+            "crear_recordatorio", "listar_recordatorios", "cancelar_recordatorio",
+            "crear_temporizador", "listar_temporizadores", "cancelar_temporizador",
+        )
+
+        # FIX: eliminar_alias ahora usa un flujo guiado completo (ver
+        # eliminar_alias_guiado en registrar_alias.py) que ya habla
+        # TODOS sus propios mensajes en cada paso, incluyendo los de
+        # fallo ("no reconozco esa app", "no tiene alias guardados",
+        # etc) — agregar el genérico "no pude realizar esa acción"
+        # encima solo suena redundante y confuso.
+        #
+        # A diferencia de recapturar_app (que en su propio código NO
+        # habla nada si falla, solo hace un print interno) — para ese
+        # caso SÍ se necesita que executor.py hable el mensaje
+        # genérico, o el usuario se quedaría sin ningún aviso. Por eso
+        # esta excepción es específica de eliminar_alias, no general.
+        if intent == "eliminar_alias":
+            pass
+        elif intent in intents_con_mensaje_propio and nombre_decir:
             hablar(nombre_decir)
         else:
             hablar(
@@ -127,9 +169,54 @@ def ejecutar(intent, valor):
         "media_subir_volumen": "Subiendo volumen",
         "media_bajar_volumen": "Bajando volumen",
         "media_silenciar":     "Silenciando",
+        # FIX: media_volumen_exacto ahora también sigue el patrón de
+        # tupla (éxito, mensaje) en vez de hablar directamente desde
+        # media_control.py (ver el FIX en esa función) — se usa el
+        # mensaje que ya viene calculado en nombre_decir.
+        "media_volumen_exacto": nombre_decir,
+        # FIX/NUEVO: crear_recordatorio también devuelve su propio
+        # mensaje de confirmación (con la hora calculada y el texto
+        # del recordatorio), igual que startup y volumen exacto.
+        "crear_recordatorio":  nombre_decir,
+        # NUEVO: listar y cancelar recordatorios también traen su
+        # mensaje ya armado (la lista hablada, o la confirmación de
+        # cuál se canceló).
+        "listar_recordatorios":   nombre_decir,
+        "cancelar_recordatorio":  nombre_decir,
+        # NUEVO: temporizadores siguen el mismo patrón que recordatorios.
+        "crear_temporizador":     nombre_decir,
+        "listar_temporizadores":  nombre_decir,
+        "cancelar_temporizador":  nombre_decir,
     }
 
     mensaje = mensajes_exito.get(intent)
+
+    # NUEVO: registrar la acción en el historial corto de memory.py,
+    # SOLO cuando tuvo éxito (si "abre algo que no existe" falló, no
+    # tiene sentido que el historial diga que se abrió). El valor
+    # guardado es el dato puro relevante para cada acción, no
+    # necesariamente nombre_decir — por ejemplo, para
+    # crear_recordatorio/crear_temporizador, nombre_decir ya es el
+    # mensaje completo de confirmación ("Listo, te recordaré..."),
+    # que no sirve para un historial corto; ahí se guarda `valor`
+    # (el dato original "duración|texto") en su lugar.
+    #
+    # FIX: crear_recordatorio ahora pide confirmación antes de crear
+    # de verdad (ver crear_recordatorio_accion en acciones.py). Si el
+    # usuario dice que no, la función devuelve éxito=True (no es un
+    # error, es una decisión válida) pero NO debe registrarse en el
+    # historial como si se hubiera creado algo — se distingue por el
+    # mensaje específico que devuelve ese caso.
+    if intent in ("abrir_app", "cerrar_app"):
+        registrar_accion(intent, nombre_real)
+    elif intent in ("media_pausar", "media_reanudar", "media_volumen_exacto"):
+        if objetivo_media:
+            registrar_accion(intent, objetivo_media)
+    elif intent == "crear_recordatorio":
+        if nombre_decir != "No se creó el recordatorio":
+            registrar_accion(intent, valor)
+    elif intent == "crear_temporizador":
+        registrar_accion(intent, valor)
 
     if mensaje:
         hablar(mensaje)

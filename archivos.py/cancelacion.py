@@ -40,10 +40,40 @@ def iniciar_cancelacion():
 
 
 def detener_cancelacion():
-    """Llama esto cuando la operación larga termina."""
-    global _activo
+    """
+    Llama esto cuando la operación larga termina.
+
+    FIX: antes esto solo ponía _activo = False y retornaba de
+    inmediato. Pero el hilo de cancelación puede estar en ese
+    momento bloqueado DENTRO de escuchar_rapido() (que abre
+    sr.Microphone() y espera hasta ~2-3s), y solo revisa la
+    bandera _activo cuando esa llamada termina. Eso dejaba una
+    ventana de hasta ~3 segundos donde, después de "detener" la
+    cancelación, el hilo principal podía intentar usar el
+    micrófono (por ejemplo confirmar_apertura() en acciones.py,
+    justo después de abrir_app()) mientras el hilo de cancelación
+    todavía tenía el micrófono abierto — dos hilos usando
+    sr.Microphone() al mismo tiempo, lo cual puede fallar según
+    el backend de audio (y el error quedaba silenciado por el
+    try/except de _loop_cancelacion, así que ni se notaba la
+    causa).
+
+    Ahora se espera (join) a que el hilo realmente termine antes
+    de devolver el control, así cuando detener_cancelacion()
+    regresa, el micrófono ya está libre con certeza. El timeout
+    del join es un poco mayor al timeout interno de
+    escuchar_rapido() para darle margen a terminar solo, nunca
+    para forzar nada.
+    """
+    global _activo, _hilo_cancelacion
+
     _activo            = False
     sesion["cancelar"] = False
+
+    if _hilo_cancelacion is not None and _hilo_cancelacion.is_alive():
+        _hilo_cancelacion.join(timeout=4)
+
+    _hilo_cancelacion = None
 
 
 def fue_cancelado():

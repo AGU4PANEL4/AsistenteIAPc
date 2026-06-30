@@ -3,6 +3,9 @@ import re
 import concurrent.futures
 from memory import memoria
 from config import MODELO_OLLAMA
+from logger import log
+from gestor_ia import motor_a_usar
+from groq_cliente import llamar_groq
 
 # =========================================================
 # CLIENTE OLLAMA CON TIMEOUT
@@ -20,15 +23,13 @@ _cliente_ollama = ollama.Client(timeout=15)
 _executor_ia    = concurrent.futures.ThreadPoolExecutor(max_workers=2)
 
 
-def _llamar_ollama(prompt, timeout=12, num_predict=40, temperature=0.2):
+def _llamar_ollama_directo(prompt, timeout=12, num_predict=40, temperature=0.2):
     """
-    Llama al modelo con un límite de tiempo real. Devuelve el texto
-    de la respuesta, o None si Ollama tardó demasiado o falló.
-
-    num_predict limita cuántos tokens puede generar como máximo —
-    como nuestras respuestas son cortas ("action|value" o 1-2
-    frases), esto evita que una generación que se desboca alargue
-    aún más una GPU ya ocupada.
+    Llama específicamente a Ollama local, sin pasar por el router
+    del modo híbrido — usada como respaldo cuando Groq falla, y
+    directamente cuando no hay internet (ver _llamar_ollama más
+    abajo, que es el punto de entrada real usado por el resto de
+    ia.py).
     """
 
     def _tarea():
@@ -39,6 +40,7 @@ def _llamar_ollama(prompt, timeout=12, num_predict=40, temperature=0.2):
                 "num_predict": num_predict,
                 "temperature": temperature,
             },
+            keep_alive="10m",
         )
 
     futuro = _executor_ia.submit(_tarea)
@@ -50,11 +52,77 @@ def _llamar_ollama(prompt, timeout=12, num_predict=40, temperature=0.2):
     except concurrent.futures.TimeoutError:
         print(f"[IA] Ollama tardó más de {timeout}s, se cancela la espera "
               f"(¿hay un juego usando la GPU en este momento?)")
+        log.warning(f"Ollama tardó más de {timeout}s, se canceló la espera")
         return None
 
     except Exception as e:
         print("[IA] Error llamando a Ollama:", e)
+        log.exception("Error llamando a Ollama")
         return None
+
+
+def _llamar_ollama(prompt, timeout=12, num_predict=40, temperature=0.2):
+    """
+    Punto de entrada único para llamar a la IA — pese al nombre
+    (que se mantiene por compatibilidad con el resto de ia.py, que
+    ya llama a esta función en varios lugares), ahora decide
+    INTERNAMENTE si usar Groq (con internet) u Ollama (sin internet)
+    según el modo híbrido (ver gestor_ia.py).
+
+    Devuelve el texto de la respuesta, o None si ambos motores
+    fallaron o tardaron demasiado.
+
+    NUEVO/HÍBRIDO: con internet se prueba Groq primero — es gratis,
+    rápido, y no consume nada de la GPU local (a diferencia de
+    Ollama, que además tenía un bug real de GPU sostenida, ver el
+    historial de comentarios más abajo). Si Groq falla por cualquier
+    motivo puntual (límite de cuota agotado, error de red, etc.) se
+    cae a Ollama local automáticamente en esa misma llamada, en vez
+    de simplemente fallar — el usuario nunca se queda sin respuesta
+    solo porque la nube tuvo un problema momentáneo.
+
+    Sin internet, se usa Ollama directo, igual que siempre funcionó.
+
+    --- HISTORIAL DE FIXES DE TIMING/RECURSOS (contexto importante) ---
+
+    FIX: el "se está demorando mucho" que aparecía SIN relación con
+    juegos ni carga de GPU, en cualquier momento, sin patrón claro,
+    no era un problema de timeout mal calibrado — era el
+    comportamiento POR DEFECTO de Ollama: descarga el modelo de
+    memoria tras 5 minutos sin uso. Como el asistente se usa con
+    pausas naturales entre comandos, es fácil superar esos 5 minutos
+    sin darse cuenta, y la SIGUIENTE petición paga el costo completo
+    de recargar el modelo.
+
+    FIX/V2: keep_alive=-1 (modelo cargado para SIEMPRE) eliminaba el
+    costo de recarga, pero el proceso de Ollama (llama-server) se
+    quedaba consumiendo 40-70% de GPU de forma SOSTENIDA incluso en
+    reposo total — un bug real y reportado de Ollama, no el
+    comportamiento esperado de keep_alive. Se mitigó bajando a
+    keep_alive="10m" (finito, no infinito) en _llamar_ollama_directo.
+
+    FIX/V3 (este cambio): la mitigación del V2 seguía dejando la GPU
+    ocupada mientras el modelo estuviera cargado dentro de esos 10
+    minutos. La solución real es no necesitar Ollama en absoluto
+    mientras haya internet — de ahí el modo híbrido completo.
+    """
+
+    motor = motor_a_usar()
+
+    if motor == "groq":
+        respuesta = llamar_groq(prompt, timeout=8, num_predict=num_predict, temperature=temperature)
+        if respuesta is not None:
+            return respuesta
+
+        # Groq falló (cuota, red puntual, etc.) — se cae a Ollama
+        # local como respaldo en esta misma llamada, encendiéndolo
+        # si no estaba corriendo (estaría apagado porque había
+        # internet hace un momento).
+        log.warning("Groq falló, cayendo a Ollama local como respaldo")
+        from verificacion import iniciar_ollama
+        iniciar_ollama()
+
+    return _llamar_ollama_directo(prompt, timeout=timeout, num_predict=num_predict, temperature=temperature)
 
 # =========================================================
 # ACCIONES VÁLIDAS
@@ -83,6 +151,12 @@ ACCIONES_VALIDAS = {
     "media_volumen_exacto",
     "registrar_alias",
     "terminar_sesion",
+    "crear_recordatorio",
+    "listar_recordatorios",
+    "cancelar_recordatorio",
+    "crear_temporizador",
+    "listar_temporizadores",
+    "cancelar_temporizador",
 }
 
 # =========================================================
@@ -121,6 +195,21 @@ NORMALIZAR_INTENT = {
     "set_volume":          "media_volumen_exacto",
     "volume_set":          "media_volumen_exacto",
     "register_alias":      "registrar_alias",
+    "create_reminder":     "crear_recordatorio",
+    "set_reminder":        "crear_recordatorio",
+    "list_reminders":      "listar_recordatorios",
+    "show_reminders":      "listar_recordatorios",
+    "cancel_reminder":     "cancelar_recordatorio",
+    "delete_reminder":     "cancelar_recordatorio",
+    "remove_reminder":     "cancelar_recordatorio",
+    "set_timer":           "crear_temporizador",
+    "create_timer":        "crear_temporizador",
+    "start_timer":         "crear_temporizador",
+    "list_timers":         "listar_temporizadores",
+    "show_timers":         "listar_temporizadores",
+    "cancel_timer":        "cancelar_temporizador",
+    "stop_timer":          "cancelar_temporizador",
+    "delete_timer":        "cancelar_temporizador",
     "end_session":         "terminar_sesion",
     "end_conversation":    "terminar_sesion",
     "stop_session":        "terminar_sesion",
@@ -170,10 +259,33 @@ def parsear_salida(salida, ultima_app):
                 print(f"[IA] Intent ignorado: {intent}")
                 continue
 
-            if valor in ("ultima_app", "{ultima_app}", "last_app", ""):
+            # FIX: la sustitución de valor vacío -> ultima_app está
+            # pensada para comandos tipo "ciérralo" (cerrar_app|) que
+            # se refieren implícitamente a la última app abierta. Pero
+            # para cancelar_temporizador y eliminar_alias, un valor
+            # vacío es una respuesta VÁLIDA e intencional:
+            # - cancelar_temporizador|: cancela el único activo si solo
+            #   hay uno (ver cancelar_por_palabra_clave).
+            # - eliminar_alias|: dispara el flujo guiado que PREGUNTA
+            #   de qué app eliminar el alias, en vez de necesitar el
+            #   nombre ya en el comando (ver eliminar_alias_guiado).
+            # Sin esta excepción, "eliminar_alias|" se convertía en
+            # "eliminar_alias|discord" (la última app usada), buscando
+            # alias de una app que el usuario nunca mencionó.
+            INTENTS_VALOR_VACIO_VALIDO = {"cancelar_temporizador", "eliminar_alias"}
+
+            if intent in INTENTS_VALOR_VACIO_VALIDO:
+                pass
+            elif valor in ("ultima_app", "{ultima_app}", "last_app", ""):
                 valor = ultima_app
 
-            if not valor:
+            # FIX: este descarte de "valor vacío" es correcto para
+            # casi todos los intents (un comando sin valor no tiene
+            # sentido, ej: abrir_app sin saber qué app). Pero
+            # cancelar_temporizador es la excepción: un valor vacío
+            # ahí significa "cancela el timer sin nombre específico",
+            # que es una intención completamente válida.
+            if not valor and intent not in INTENTS_VALOR_VACIO_VALIDO:
                 continue
 
             acciones.append((intent, valor))
@@ -208,7 +320,12 @@ activar_startup    → enable autostart with Windows
 desactivar_startup → disable autostart with Windows
 estado_startup     → check if autostart is enabled
 recapturar_app     → re-register app processes
-eliminar_alias     → forget/delete an alias
+eliminar_alias     → start a guided flow to forget/delete an alias.
+                      value is the name of the APP if the user already
+                      said it (e.g. "brawlhalla"), or empty string if
+                      they didn't name one yet — the flow itself asks
+                      and shows existing aliases to choose from, so
+                      you don't need the exact alias text here
 minimizar_app      → minimize an app (send to taskbar)
 maximizar_app      → bring an app to front / restore it
 media_pausar       → pause music or video
@@ -220,6 +337,34 @@ media_bajar_volumen → decrease system volume
 media_silenciar    → mute or unmute system volume
 media_volumen_exacto → set volume to exact percentage (e.g. 50, 70)
 registrar_alias    → register new aliases for an app interactively
+crear_recordatorio → create a reminder for later. value format is
+                      "when|what" — exactly one "|" separating the
+                      time (relative like "10 minutos"/"1 hora", or
+                      exact like "15:30"/"3 pm"/"4 y media"/"450") from
+                      what to be reminded of, in Spanish, as the user
+                      said it. If the user gave a clear time but did
+                      NOT say what to be reminded of, leave the part
+                      after "|" EMPTY (e.g. "4 y media|") instead of
+                      inventing something — the assistant will ask
+                      the user for a name afterwards
+listar_recordatorios → list the user's pending reminders
+cancelar_recordatorio → cancel a reminder. value is the keyword(s)
+                      identifying WHICH reminder, in Spanish, taken
+                      from what the user said (e.g. "la pizza", "mamá")
+crear_temporizador → start a countdown timer (NOT a reminder for a
+                      specific time/date — only relative durations).
+                      value format is "duration|name" — exactly one
+                      "|" separating the duration ("10 minutos",
+                      "1 hora 30 minutos") from an OPTIONAL name
+                      ("pasta", "ejercicio"). If the user gave no
+                      name, leave it empty after the "|" (e.g.
+                      "10 minutos|")
+listar_temporizadores → list the user's active timers and how much
+                      time is left on each
+cancelar_temporizador → cancel a timer. value is the keyword(s)
+                      identifying WHICH timer (its name, e.g. "pasta"),
+                      or empty string if the user didn't name one and
+                      just said "cancel the timer"
 terminar_sesion    → the user is saying goodbye, has nothing else to ask,
                       or wants to end the conversation (in ANY phrasing,
                       not just literal "goodbye" — infer it from intent,
@@ -240,7 +385,9 @@ activa inicio automático → activar_startup|startup
 ciérralo → cerrar_app|{ultima_app or "app"}
 ábrelo → abrir_app|{ultima_app or "app"}
 vuelve a registrar cs2 → recapturar_app|cs2
-olvida el alias osu → eliminar_alias|osu
+olvida el alias de brawlhalla → eliminar_alias|brawlhalla
+quiero eliminar un alias → eliminar_alias|
+elimina un alias → eliminar_alias|
 minimiza el discord → minimizar_app|discord
 minimízalo → minimizar_app|{ultima_app or "app"}
 trae el chrome → maximizar_app|chrome
@@ -264,6 +411,22 @@ volumen de spotify al 70 → media_volumen_exacto|spotify 70
 sube el volumen de discord al 30 → media_volumen_exacto|discord 30
 registra alias → registrar_alias|alias
 asigna alias → registrar_alias|alias
+recuérdame en 10 minutos que saque la pizza → crear_recordatorio|10 minutos|saque la pizza
+acuérdame en media hora de llamar a mamá → crear_recordatorio|30 minutos|llamar a mamá
+avísame a las 3 pm que tengo reunión → crear_recordatorio|3 pm|tengo reunión
+crea un recordatorio para las 4 y media → crear_recordatorio|4 y media|
+ponme un recordatorio a las 450 → crear_recordatorio|450|
+ponme un recordatorio para las 15:30 de revisar el horno → crear_recordatorio|15:30|revisar el horno
+qué tengo pendiente de recordar → listar_recordatorios|recordatorios
+tengo algún recordatorio activo → listar_recordatorios|recordatorios
+ya no me recuerdes lo de la pizza → cancelar_recordatorio|la pizza
+quita el recordatorio que puse de mamá → cancelar_recordatorio|mamá
+pon un timer de 10 minutos → crear_temporizador|10 minutos|
+pon un timer de pasta a 15 minutos → crear_temporizador|15 minutos|pasta
+necesito un cronómetro de 5 minutos para el café → crear_temporizador|5 minutos|el café
+cuánto le queda al timer → listar_temporizadores|temporizadores
+cancela el timer → cancelar_temporizador|
+cancela el timer de pasta → cancelar_temporizador|pasta
 no, nada más → terminar_sesion|sesion
 no, gracias → terminar_sesion|sesion
 ya quedé así → terminar_sesion|sesion
@@ -309,24 +472,51 @@ def responder_charla(texto):
 
     ultima_app = memoria.get("ultima_app", "")
 
-    prompt = f"""Eres Jarvis, el asistente de voz de un computador. Hablas en
-español, de forma natural y cercana, como alguien real conversando, no como
-un narrador ni un robot que lee instrucciones.
+    # FIX: antes el prompt SIEMPRE pedía una respuesta conversacional,
+    # sin darle al modelo la opción de reconocer que el texto de
+    # FIX/V2: la versión anterior de este prompt, con la estructura
+    # "SI tiene sentido / SI NO tiene sentido" en mayúsculas, terminó
+    # siendo literalmente REPETIDA por el modelo como si fuera su
+    # respuesta — un usuario reportó que Jarvis dijo en voz alta
+    # "SI NO tiene sentido", una frase sacada directo del prompt. Un
+    # modelo de 3B parámetros puede "engancharse" con texto que tiene
+    # forma de lista/instrucción y copiarlo en vez de seguirlo,
+    # especialmente si el prompt es largo.
+    #
+    # Esta versión es más corta y usa EJEMPLOS concretos de
+    # entrada->salida en vez de explicar la regla de forma abstracta
+    # — los modelos chicos siguen mejor patrones de ejemplo que
+    # instrucciones condicionales largas, y hay mucho menos texto
+    # "con forma de regla" que el modelo pueda confundir con
+    # contenido a repetir.
+    prompt = f"""Eres Jarvis, un asistente de voz que habla español de forma
+natural, como una persona real, no como un narrador.
 
-Reglas:
-- Máximo 1 o 2 frases cortas, pensadas para decirse en voz alta (esto se
-  convierte directamente en audio).
-- Si el usuario solo está saludando, charlando, agradeciendo o haciendo una
-  pregunta general, respóndele de forma natural y breve.
-- Si el comando suena a una orden pero está incompleta o ambigua (por
-  ejemplo no dice qué app abrir, o dice "ábrelo" sin que haya una app
-  reciente), pregúntale qué quiere específicamente.
-- No uses listas, ni emojis, ni formato markdown, ni comillas.
+El texto del usuario viene de un reconocedor de voz que a veces transcribe
+mal — puede llegar como palabras sueltas sin sentido. Si pasa eso, dile
+brevemente que no entendió y que repita. Si el texto sí tiene sentido,
+responde normal, corto y natural.
+
+Ejemplos:
+usuario: hola jarvis -> jarvis: hola, ¿en qué te ayudo?
+usuario: ya debes -> jarvis: no te escuché bien, ¿puedes repetir?
+usuario: namas -> jarvis: no entendí eso, dime otra vez
+usuario: gracias -> jarvis: de nada, aquí estoy si necesitas algo más
+usuario: ábrelo -> jarvis: ¿qué app quieres abrir?
+
+Responde en máximo 1 o 2 frases cortas, sin listas, sin emojis, sin
+comillas, sin markdown.
 
 Contexto: la última app que el usuario usó fue "{ultima_app or 'ninguna'}".
 
 Usuario: {texto}
 Jarvis:"""
 
-    salida = _llamar_ollama(prompt, timeout=10, num_predict=60, temperature=0.6)
+    # FIX: temperature=0.6 le daba al modelo bastante libertad creativa
+    # — ayuda a que no suene robótico, pero también es parte de por qué
+    # a veces "se iba por las ramas" inventando interpretaciones
+    # extrañas sobre texto ambiguo. 0.45 mantiene respuestas naturales
+    # y variadas (no es determinístico ni suena repetitivo) pero
+    # reduce la varianza de salidas extrañas en los casos límite.
+    salida = _llamar_ollama(prompt, timeout=10, num_predict=60, temperature=0.45)
     return salida or None

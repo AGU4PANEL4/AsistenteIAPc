@@ -23,6 +23,12 @@ TOOLS = {
     "eliminar_alias":      eliminar_alias_app,
     "minimizar_app":       minimizar_app,
     "maximizar_app":       maximizar_app,
+    "crear_recordatorio":  crear_recordatorio_accion,
+    "listar_recordatorios": listar_recordatorios_accion,
+    "cancelar_recordatorio": cancelar_recordatorio_accion,
+    "crear_temporizador":   crear_temporizador_accion,
+    "listar_temporizadores": listar_temporizadores_accion,
+    "cancelar_temporizador": cancelar_temporizador_accion,
     # media
     "media_pausar":        media_pausa_reanuda,
     "media_reanudar":      media_pausa_reanuda,

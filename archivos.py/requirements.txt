@@ -1,23 +1,35 @@
-pyinstaller==6.10.0
+pyinstaller==6.20.0
 
 # IA
-ollama==0.3.3
+ollama==0.6.2
+groq>=0.11.0
 
 # Voz
-SpeechRecognition==3.10.4
+SpeechRecognition==3.16.1
 PyAudio==0.2.14
-edge-tts>=7.2.7
+edge-tts==7.2.8
 pygame==2.6.1
-pyttsx3==2.90
+pyttsx3==2.99
+faster-whisper==1.2.1
+numpy==2.4.6
+
+# IMPORTANTE: NO instalar "openai-whisper" en este entorno. Es un
+# paquete DISTINTO de faster-whisper (el que el asistente realmente
+# usa, vía ctranslate2) — openai-whisper trae PyTorch completo con
+# soporte CUDA como dependencia, lo cual agrega ~3.5GB de DLLs de
+# CUDA/torch al instalador final aunque el asistente nunca los use
+# para nada. Si alguna vez se instala por error (ej. siguiendo un
+# tutorial que lo mencione), desinstalar con:
+#   pip uninstall openai-whisper torch torchvision torchaudio -y
 
 # Control de medios / sistema (Windows)
-pywin32==306
+pywin32==311
 winshell==0.6
-comtypes==1.4.5
-pycaw==20240210
+comtypes==1.4.16
+pycaw==20251023
 winsdk==1.0.0b10
 pyautogui==0.9.54
-psutil==6.0.0
+psutil==7.2.2
 
 # Red / utilidades
-requests==2.32.3
+requests==2.34.2

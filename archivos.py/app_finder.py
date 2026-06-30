@@ -388,8 +388,24 @@ def limpiar_cache_duplicados():
 # =========================================================
 
 def indexar_juegos_steam():
+    # FIX: antes esta función hacía games_index.clear() y luego lo
+    # reconstruía entrada por entrada en el mismo diccionario global.
+    # Como esto corre en un hilo daemon en background (ver main.py)
+    # mientras el hilo principal puede estar buscando un juego al mismo
+    # tiempo (buscar_app lee games_index), había una ventana de varios
+    # segundos donde el índice estaba vacío o solo parcialmente lleno
+    # — el usuario podía pedir abrir un juego que SÍ está instalado y
+    # el asistente decir que no lo encuentra, solo por mala suerte de
+    # timing con el reindexado.
+    #
+    # Ahora se construye todo en un diccionario temporal (nuevo_index)
+    # y solo al final se reemplaza games_index de una sola asignación.
+    # Esa asignación es atómica en Python, así que cualquier lectura
+    # desde otro hilo siempre ve o el índice viejo completo, o el nuevo
+    # completo — nunca un estado a medio construir.
     global games_index
-    games_index.clear()
+
+    nuevo_index = {}
 
     steam_path = None
     try:
@@ -450,13 +466,13 @@ def indexar_juegos_steam():
                         print("Ignorado:", nombre)
                         continue
 
-                    if nombre in games_index:
+                    if nombre in nuevo_index:
                         continue
 
                     appid    = match_appid.group(1) if match_appid else ""
                     exe_path = match_exe.group(1)   if match_exe  else ""
 
-                    games_index[nombre] = {
+                    nuevo_index[nombre] = {
                         "ruta":     str(manifest),
                         "appid":    appid,
                         "tipo":     "steam",
@@ -472,6 +488,7 @@ def indexar_juegos_steam():
         except Exception as e:
             print("Error biblioteca:", e)
 
+    games_index = nuevo_index
     guardar_games_index()
     print(f"Juegos Steam indexados: {total}")
 
@@ -652,9 +669,42 @@ def buscar_app(nombre, fn_confirmar_rebuscar=None, fn_cancelado=None):
 
     # =====================================================
     # CACHE
+    # FIX: indexar_apps() e indexar_juegos_steam() corren en hilos
+    # daemon en background (ver main.py) y mutan apps_index/games_index
+    # directamente (incluyendo un .clear() en games_index). Si justo
+    # en ese momento el hilo principal está iterando con .items() para
+    # buscar una app, Python puede lanzar "RuntimeError: dictionary
+    # changed size during iteration". Iterar sobre list(...items()) /
+    # dict(...) toma una copia atómica en el momento de la llamada, así
+    # que ya no importa si el otro hilo sigue escribiendo el original
+    # mientras este hilo recorre la copia.
+    #
+    # FIX/NUEVO: antes, si la ruta guardada en cache ya no existía
+    # (la app se desinstaló, o se movió a otra carpeta/disco), esto
+    # simplemente no consideraba esa entrada un match — pero la dejaba
+    # intacta en el cache para siempre, y la búsqueda pasaba en
+    # silencio a games_index/apps_index sin ningún aviso. Si esos
+    # índices tampoco tenían la app (porque de verdad se desinstaló),
+    # el usuario recibía un confuso "no encontré X" para una app que
+    # ANTES sí funcionaba, sin entender por qué dejó de funcionar.
+    #
+    # Ahora, cuando se detecta una entrada de cache con ruta rota, se
+    # ELIMINA del cache inmediatamente (ya no sirve, y dejarla solo
+    # ensucia futuras búsquedas) y la ejecución sigue de largo hacia
+    # games_index/apps_index/disco — exactamente el mismo camino que
+    # ya existe para "esta app nunca estuvo en cache". Eso significa
+    # que el comportamiento que ya tenía abrir_app() para apps nuevas
+    # (rescanear, confirmar con el usuario, volver a guardar en cache)
+    # se reutiliza automáticamente para apps que se movieron — sin
+    # necesitar ningún flujo nuevo. Si tampoco se encuentra en disco,
+    # el resto del código ya maneja ese "no encontrado" como siempre,
+    # que es el comportamiento correcto para una app que de verdad se
+    # desinstaló.
     # =====================================================
 
-    for clave, data in cache.items():
+    claves_rotas = []
+
+    for clave, data in list(cache.items()):
         clave_limpia = limpiar_nombre(clave)
         if (
             nombre_limpio == clave_limpia
@@ -662,6 +712,7 @@ def buscar_app(nombre, fn_confirmar_rebuscar=None, fn_cancelado=None):
             or clave_limpia in nombre_limpio
         ):
             ruta = data.get("ruta", "") if isinstance(data, dict) else str(data)
+
             if ruta and os.path.exists(ruta):
                 print("Cache:", clave)
                 if isinstance(data, dict):
@@ -672,11 +723,25 @@ def buscar_app(nombre, fn_confirmar_rebuscar=None, fn_cancelado=None):
                     "tipo":            "normal"
                 }, True, clave
 
+            # la ruta de esta entrada ya no existe — se marca para
+            # eliminar (no se borra acá mismo para no mutar `cache`
+            # mientras `list(cache.items())` todavía podría tener más
+            # coincidencias que revisar en esta misma búsqueda)
+            if ruta:
+                print(f"[Cache] Ruta obsoleta para '{clave}': {ruta} (ya no existe, se eliminará del cache)")
+                claves_rotas.append(clave)
+
+    for clave in claves_rotas:
+        cache.pop(clave, None)
+
+    if claves_rotas:
+        guardar_cache()
+
     # =====================================================
     # GAMES INDEX
     # =====================================================
 
-    for clave, data in games_index.items():
+    for clave, data in list(games_index.items()):
         try:
             clave_limpia = limpiar_nombre(clave)
             if (
@@ -693,7 +758,7 @@ def buscar_app(nombre, fn_confirmar_rebuscar=None, fn_cancelado=None):
     # APPS INDEX
     # =====================================================
 
-    for clave, data in apps_index.items():
+    for clave, data in list(apps_index.items()):
         try:
             if data.get("oculto", False):
                 continue

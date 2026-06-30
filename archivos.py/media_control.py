@@ -54,15 +54,33 @@ except ImportError:
 # YouTube no tiene su propio AppUserModelId — corre adentro del
 # navegador, así que para reconocer "youtube" hay que buscar entre
 # las sesiones que vienen de un navegador, no por nombre exacto.
-NAVEGADORES_AUMID = {
-    "chrome.exe", "msedge.exe", "opera.exe", "operagx.exe",
-    "firefox.exe", "brave.exe", "vivaldi.exe", "chromium.exe",
-}
+# FIX: antes este set tenía nombres de archivo .exe ("operagx.exe",
+# "chrome.exe"...), pero el AppUserModelId (AUMID) que reporta SMTC
+# para navegadores NO es el nombre del .exe — es un identificador
+# estructurado distinto. Por ejemplo, Opera GX se reporta como
+# "OperaSoftware.OperaGXWebBrowser.<algo>", nunca como "operagx.exe".
+# Con la comparación exacta anterior, _smtc_es_navegador() devolvía
+# SIEMPRE False para Opera GX (y probablemente para otros navegadores
+# reales también), así que nunca se encontraba la sesión de YouTube
+# por esta vía — quedaba oculto porque antes el código caía a "la
+# sesión activa del sistema" como fallback (causando el bug de
+# reanudar Spotify en vez de YouTube). Al arreglar ESE bug, este quedó
+# expuesto: ya no había fallback, pero la detección de navegador
+# tampoco funcionaba, entonces no encontraba YouTube de ninguna forma.
+#
+# Ahora se compara por SUBSTRING de fragmentos típicos del AUMID real
+# de cada navegador, que sí aparecen sin importar el formato exacto
+# del identificador completo.
+NAVEGADORES_AUMID_FRAGMENTOS = (
+    "chrome", "msedge", "edge", "opera", "firefox",
+    "brave", "vivaldi", "chromium",
+)
 
 
 def _smtc_es_navegador(sesion):
     try:
-        return (sesion.source_app_user_model_id or "").lower() in NAVEGADORES_AUMID
+        aumid = (sesion.source_app_user_model_id or "").lower()
+        return any(frag in aumid for frag in NAVEGADORES_AUMID_FRAGMENTOS)
     except:
         return False
 
@@ -115,7 +133,8 @@ async def _smtc_accion_async(accion, nombre_app=None):
         except Exception as e:
             print("[SMTC] No pude listar sesiones:", e)
 
-    sesion_obj = None
+    sesion_obj  = None
+    app_pedida_no_encontrada = False
 
     if nombre_app:
         nombre_limpio = nombre_app.lower()
@@ -133,17 +152,40 @@ async def _smtc_accion_async(accion, nombre_app=None):
                 except:
                     pass
 
-    # si no se especificó app, o no se encontró, usar la sesión activa
-    if not sesion_obj:
+        # FIX: el bug real era acá. Si el usuario pidió una app
+        # EXPLÍCITA (ej: "reanuda youtube") y no se encontró su sesión
+        # SMTC específica, el código antes caía a "usar la sesión
+        # activa del sistema" (manager.get_current_session()) sin
+        # importar qué app era esa sesión. Si en ese momento la
+        # sesión activa reportada por Windows era Spotify (ej: porque
+        # fue la última en sonar, o tiene el foco de medios), SMTC
+        # "tenía éxito" pausando/reanudando SPOTIFY en vez de YouTube,
+        # y _control_reproduccion nunca llegaba a intentar el método
+        # de respaldo correcto (_controlar_youtube), porque el método
+        # SMTC ya había devuelto True.
+        #
+        # Ahora, si se pidió una app explícita y no se encontró su
+        # sesión, se marca como "no encontrada" y NO se usa ningún
+        # fallback de sesión genérica — se deja que SMTC falle limpio,
+        # para que _control_reproduccion pase al siguiente método
+        # (_controlar_spotify / _controlar_youtube /
+        # _controlar_cualquier_reproductor), que sí busca
+        # específicamente esa app y no otra.
+        if not sesion_obj:
+            app_pedida_no_encontrada = True
+
+    # si no se especificó ninguna app, usar la sesión activa del
+    # sistema como antes — ahí sí es correcto ser permisivo
+    if not sesion_obj and not nombre_app:
         try:
             sesion_obj = manager.get_current_session()
         except:
             sesion_obj = None
 
-    if not sesion_obj and sesiones:
-        sesion_obj = sesiones[0]
+        if not sesion_obj and sesiones:
+            sesion_obj = sesiones[0]
 
-    if not sesion_obj:
+    if not sesion_obj or app_pedida_no_encontrada:
         return False
 
     try:
@@ -317,7 +359,16 @@ def _obtener_pids_por_nombre(nombre_app):
             pass
 
     # por cache (procesos_cierre y carpetas)
-    for clave, valor in app_finder.cache.items():
+    # FIX: capturar_pids_por_nombre() (acciones_apps.py) corre en un
+    # hilo daemon en background después de abrir_app() y puede estar
+    # mutando app_finder.cache durante hasta 60 segundos. Si en esa
+    # ventana se pide ajustar el volumen de esa misma app, iterar
+    # cache.items() directo (sin copia) podía lanzar "RuntimeError:
+    # dictionary changed size during iteration" — mismo problema ya
+    # arreglado en app_finder.buscar_app(). list(...) toma una copia
+    # atómica, evitando el crash sin importar qué esté escribiendo
+    # el otro hilo al mismo tiempo.
+    for clave, valor in list(app_finder.cache.items()):
         clave_limpia = _limpiar(clave)
         if (
             clave_limpia == nombre_limpio
@@ -659,6 +710,52 @@ _VK_POR_ACCION = {
 }
 
 
+def _hay_alguna_sesion_navegador_smtc():
+    """
+    Verifica si CUALQUIER navegador tiene una sesión SMTC activa en
+    este momento — sin importar de qué app se trate. Usado como
+    verificación de seguridad antes de confiar en _controlar_youtube
+    (ver _controlar_youtube_seguro): si SMTC no reporta NINGUNA
+    sesión de navegador, es una señal confiable de que no hay nada
+    de media real reproduciéndose en ningún navegador ahora mismo,
+    así que mandar una tecla multimedia a una ventana de navegador
+    "por si acaso" es más riesgo (puede afectar a otra app) que
+    beneficio.
+    """
+    if not SMTC_DISPONIBLE:
+        # sin SMTC disponible no hay forma de verificar — se asume
+        # que sí podría haber algo, para no bloquear el método de
+        # respaldo en sistemas donde SMTC simplemente no es accesible
+        return True
+
+    async def _verificar():
+        manager  = await _SmtcManager.request_async()
+        sesiones = list(manager.get_sessions())
+        return any(_smtc_es_navegador(s) for s in sesiones)
+
+    try:
+        return asyncio.run(_verificar())
+    except Exception:
+        return True
+
+
+def _controlar_youtube_seguro(accion):
+    """
+    Como _controlar_youtube, pero solo actúa si hay evidencia de que
+    realmente hay una sesión de media activa en algún navegador (vía
+    SMTC). Si no hay ninguna sesión SMTC de navegador, se asume que
+    la ventana encontrada por título ("...youtube...") no tiene nada
+    reproduciéndose de verdad, y se falla limpio en vez de mandar
+    WM_APPCOMMAND a ciegas — ver el FIX en _control_reproduccion
+    para el caso real que esto evita (la tecla terminando afectando
+    a otra app, como Spotify, en vez de no hacer nada).
+    """
+    if not _hay_alguna_sesion_navegador_smtc():
+        return False
+
+    return _controlar_youtube(accion)
+
+
 def _control_reproduccion(accion, valor=None):
 
     app, explicito = _resolver_app_objetivo(valor)
@@ -673,7 +770,29 @@ def _control_reproduccion(accion, valor=None):
         if _es_spotify(app):
             return _controlar_spotify(accion)
         if _es_youtube(app):
-            return _controlar_youtube(accion)
+            # FIX: antes esto llamaba _controlar_youtube() a ciegas en
+            # cuanto encontraba una VENTANA con "youtube" en el título
+            # — pero una pestaña abierta sin nada reproduciéndose
+            # también tiene ese título, y WM_APPCOMMAND mandado a una
+            # ventana SIN sesión de media propia puede terminar
+            # redirigiéndose al foco de media ACTIVO del sistema (otra
+            # app, ej Spotify), en vez de simplemente no hacer nada.
+            # Resultado real observado: "reanuda youtube" con una
+            # pestaña de YouTube abierta pero pausada/sin cargar nada
+            # terminaba reanudando Spotify.
+            #
+            # Ya pasamos por el paso 1 (SMTC) arriba y NO encontró
+            # ninguna sesión de navegador — eso es justamente la señal
+            # confiable de "no hay nada de YouTube sonando realmente"
+            # (SMTC solo reporta sesiones con metadata real de media).
+            # Por eso, si llegamos hasta aquí, ya sabemos que no hay
+            # sesión activa — se intenta _controlar_youtube() de todas
+            # formas (por si SMTC falló por otro motivo, ej. el
+            # navegador no integra con SMTC en esa versión), pero ya
+            # no se confía en su resultado a ojos cerrados: si la
+            # ventana encontrada no tiene una sesión SMTC propia
+            # asociada, no se reporta éxito.
+            return _controlar_youtube_seguro(accion)
         return _controlar_cualquier_reproductor(accion, app, permitir_global=False)
 
     # 3) sin app explícita (o inferida de memoria): comportamiento
@@ -732,20 +851,42 @@ def media_silenciar(valor=None):
 #   "50 spotify"      → spotify al 50%
 # =========================================================
 
+# =========================================================
+# VOLUMEN EXACTO
+# valor puede ser:
+#   "50"              → sistema al 50%
+#   "spotify 50"      → spotify al 50%
+#   "50 spotify"      → spotify al 50%
+#
+# FIX: antes esta función llamaba a hablar() directamente y
+# devolvía solo True/False. Ese era exactamente el mismo patrón
+# que causó el bug de doble mensaje en activar_startup/
+# desactivar_startup (acciones.py): mezclar "quién habla" entre
+# la tool y executor.py es frágil — basta que alguien agregue
+# este intent a mensajes_exito en executor.py en el futuro (algo
+# fácil de hacer sin darse cuenta, ya que la mayoría de tools sí
+# están ahí) para que el mensaje se vuelva a duplicar.
+#
+# Ahora esta función no habla: devuelve (éxito, mensaje) con el
+# texto específico de cada caso (volumen de app / volumen del
+# sistema / sin número válido), igual que abrir_app, cerrar_app,
+# etc. executor.py es el único lugar que llama a hablar() con
+# ese mensaje.
+# =========================================================
+
 def media_volumen_exacto(valor=None):
-    from tts import hablar
     from memory import memoria
     from aliases import traducir_alias
 
     if not valor:
-        return False
+        return False, None
 
     valor_str = str(valor).strip().lower()
 
     # extraer número
     numeros = re.findall(r"\d+", valor_str)
     if not numeros:
-        return False
+        return False, None
 
     porcentaje = int(numeros[0])
 
@@ -768,8 +909,7 @@ def media_volumen_exacto(valor=None):
 
         exito = _set_volumen_app(nombre_app, porcentaje)
         if exito:
-            hablar(f"Volumen de {nombre_app} al {porcentaje} por ciento")
-            return True
+            return True, f"Volumen de {nombre_app} al {porcentaje} por ciento"
 
         # app no encontrada o no tiene sesión de audio → sistema
         print(f"[VOLUMEN] App no encontrada en mixer, ajustando sistema")
@@ -777,5 +917,6 @@ def media_volumen_exacto(valor=None):
     # sin app o app sin sesión → volumen del sistema
     exito = _set_volumen_sistema(porcentaje)
     if exito:
-        hablar(f"Volumen al {porcentaje} por ciento")
-    return exito
+        return True, f"Volumen al {porcentaje} por ciento"
+
+    return False, None
