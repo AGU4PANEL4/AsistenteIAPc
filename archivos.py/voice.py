@@ -283,8 +283,28 @@ def _transcribir_whisper(audio_data, initial_prompt=None, beam_size=5, hotwords=
         hotwords=hotwords,
     )
 
-    texto = " ".join(segmento.text.strip() for segmento in segmentos)
-    return texto.strip()
+    # FIX/NUEVO: vad_filter=True descarta silencio puro, pero NO
+    # descarta audio con energía real que no es habla del usuario
+    # (ruido de fondo, sonido de un juego, la propia voz del TTS
+    # colándose por el micrófono, etc) — Whisper puede "alucinar"
+    # texto con sentido sobre ese tipo de audio, generando comandos
+    # fantasma que nadie dijo. Cada segmento devuelto trae
+    # no_speech_prob: la probabilidad, estimada por el propio modelo,
+    # de que ESE segmento en particular sea silencio/ruido sin habla
+    # real. Se descartan los segmentos por encima del umbral, quedando
+    # solo con las partes donde Whisper está razonablemente seguro de
+    # que sí hubo voz — mismo mecanismo ya usado en groq_cliente.py
+    # para la transcripción en la nube (ver transcribir_groq), ahora
+    # aplicado también acá para el Whisper local.
+    UMBRAL_NO_SPEECH = 0.6
+
+    segmentos = list(segmentos)
+    partes_validas = [
+        s.text.strip() for s in segmentos if s.no_speech_prob < UMBRAL_NO_SPEECH
+    ]
+
+    texto = " ".join(partes_validas).strip()
+    return texto
 
 
 def _transcribir_con_timeout(audio_data, timeout=None, initial_prompt=None, beam_size=5, hotwords=None, modelo=None):
@@ -338,8 +358,7 @@ def _transcribir(audio_data, initial_prompt=None, beam_size=5, hotwords=None,
     "Stellar Blade"). Sin internet, o si Groq falla, se usa el
     Whisper local como siempre funcionó, y si ESE también falla,
     cae a recognize_google() como último respaldo.
-
-    FIX/NUEVO: permitir_groq=False fuerza a NO usar Groq sin importar
+FIX/NUEVO: permitir_groq=False fuerza a NO usar Groq sin importar
     si hay internet o no, saltando directo al Whisper local. Se usa
     desde escuchar_wake_word() — mientras el asistente espera la wake
     word (la gran mayoría del tiempo que está encendido, en loop

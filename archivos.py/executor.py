@@ -5,7 +5,81 @@ from tts import hablar
 from logger import log
 
 
+def _ejecutar_pasos(pasos, origen="cadena"):
+    """
+    Ejecuta una lista de pasos [{intent, valor}, ...] en orden,
+    hablando un resumen al final. Compartido entre cadenas en el
+    momento y macros guardadas — la única diferencia es el texto
+    de logging.
+
+    Devuelve (exitos, fallos) para que quien llame decida qué decir.
+    """
+    exitos = 0
+    fallos = 0
+
+    for paso in pasos:
+        ok = ejecutar(paso["intent"], paso["valor"])
+        if ok:
+            exitos += 1
+        else:
+            fallos += 1
+
+    return exitos, fallos
+
+
 def ejecutar(intent, valor):
+
+    intent     = str(intent).lower().strip()
+    valor      = str(valor).strip()
+    valor_norm = valor.lower()
+
+    # =====================================================
+    # CADENA EN EL MOMENTO
+    # intents.py devuelve "cadena" con los pasos serializados
+    # como JSON cuando detecta "abre X y Y" etc.
+    # =====================================================
+
+    if intent == "cadena":
+        import json
+        try:
+            pasos = json.loads(valor)
+        except Exception:
+            hablar("No pude entender la secuencia de acciones")
+            return False
+
+        exitos, fallos = _ejecutar_pasos(pasos, origen="cadena")
+
+        if fallos > 0 and exitos == 0:
+            hablar("No pude realizar ninguna de las acciones")
+            return False
+
+        return True
+
+    # =====================================================
+    # MACRO GUARDADA
+    # intents.py devuelve "ejecutar_macro" con el nombre de la
+    # macro como valor cuando detecta una coincidencia.
+    # =====================================================
+
+    if intent == "ejecutar_macro":
+        from macros import obtener_macro
+        nombre_macro, pasos = obtener_macro(valor)
+
+        if not pasos:
+            hablar(f"No encontré ninguna macro llamada {valor}")
+            return False
+
+        hablar(f"Ejecutando macro {nombre_macro}")
+        exitos, fallos = _ejecutar_pasos(pasos, origen=f"macro:{nombre_macro}")
+
+        if fallos > 0 and exitos == 0:
+            hablar("La macro no pudo completarse")
+            return False
+
+        if fallos > 0:
+            hablar(f"Macro completada con {fallos} paso{'s' if fallos > 1 else ''} fallido{'s' if fallos > 1 else ''}")
+
+        return True
 
     intent     = str(intent).lower().strip()
     valor      = str(valor).strip()
@@ -112,6 +186,9 @@ def ejecutar(intent, valor):
             "activar_startup", "desactivar_startup", "media_volumen_exacto",
             "crear_recordatorio", "listar_recordatorios", "cancelar_recordatorio",
             "crear_temporizador", "listar_temporizadores", "cancelar_temporizador",
+            "crear_macro", "listar_macros", "eliminar_macro",
+            "activar_no_molestar", "desactivar_no_molestar", "estado_no_molestar",
+            "crear_recordatorio_recurrente",
         )
 
         # FIX: eliminar_alias ahora usa un flujo guiado completo (ver
@@ -178,6 +255,7 @@ def ejecutar(intent, valor):
         # mensaje de confirmación (con la hora calculada y el texto
         # del recordatorio), igual que startup y volumen exacto.
         "crear_recordatorio":  nombre_decir,
+        "crear_recordatorio_recurrente": nombre_decir,
         # NUEVO: listar y cancelar recordatorios también traen su
         # mensaje ya armado (la lista hablada, o la confirmación de
         # cuál se canceló).
@@ -187,6 +265,16 @@ def ejecutar(intent, valor):
         "crear_temporizador":     nombre_decir,
         "listar_temporizadores":  nombre_decir,
         "cancelar_temporizador":  nombre_decir,
+        # macros
+        "crear_macro":            nombre_decir,
+        "listar_macros":          nombre_decir,
+        "eliminar_macro":         nombre_decir,
+        # actualizaciones
+        "buscar_actualizacion":   nombre_decir,
+        # no molestar
+        "activar_no_molestar":    nombre_decir,
+        "desactivar_no_molestar": nombre_decir,
+        "estado_no_molestar":     nombre_decir,
     }
 
     mensaje = mensajes_exito.get(intent)

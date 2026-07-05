@@ -47,7 +47,7 @@ if CARPETA_ANTIGUA.exists():
 ARCHIVO_CACHE          = CARPETA_DATOS / "cache.json"
 ARCHIVO_INDEX          = CARPETA_DATOS / "apps_index.json"
 ARCHIVO_GAMES          = CARPETA_DATOS / "games_index.json"
-ARCHIVO_NO_ENCONTRADAS = CARPETA_DATOS / "apps_no_encontradas.txt"
+ARCHIVO_NO_ENCONTRADAS = CARPETA_DATOS / "apps_no_encontradas.json"
 
 # ==========================================
 # CREAR SI NO EXISTEN
@@ -58,8 +58,10 @@ def asegurar_archivos():
         if not archivo.exists():
             with open(archivo, "w", encoding="utf-8") as f:
                 json.dump({}, f, indent=4, ensure_ascii=False)
-    if not ARCHIVO_NO_ENCONTRADAS.exists():
-        ARCHIVO_NO_ENCONTRADAS.touch()
+    # ARCHIVO_NO_ENCONTRADAS no se crea en el arranque — se crea
+    # la primera vez que se registra una app no encontrada, en
+    # _guardar_no_encontradas_raw(). Crearlo vacío acá generaba
+    # un archivo .txt vacío en el formato antiguo.
 
 asegurar_archivos()
 
@@ -194,40 +196,129 @@ def guardar_games_index():
 # =========================================================
 # APPS NO ENCONTRADAS
 # =========================================================
+#
+# FIX/NUEVO: antes se guardaba solo el nombre de la app, sin ninguna
+# fecha — no había forma de saber cuándo se marcó como no encontrada.
+# Esto causaba que una app que falló en indexarse una vez (ej. Steam
+# estaba cerrando justo en ese momento, o el disco externo no estaba
+# conectado) quedara bloqueada para siempre, sin que el usuario supiera
+# por qué "Jarvis" nunca la encontraba aunque estuviera instalada.
+#
+# Ahora se usa JSON con timestamps. Las entradas expiran
+# automáticamente después de DIAS_EXPIRACION_NO_ENCONTRADAS días —
+# al expirar, la app se vuelve a buscar normalmente en el próximo
+# intento, sin que el usuario tenga que hacer nada.
+#
+# Compatibilidad: si el archivo viejo (formato .txt, una app por línea)
+# existe, se migra automáticamente al nuevo formato JSON, asignando
+# la fecha de hoy como timestamp de registro (conservador — empieza
+# a contar desde la migración, no asume que llevan mucho tiempo).
+
+DIAS_EXPIRACION_NO_ENCONTRADAS = 7  # días hasta que una entrada expira
+
+
+def _migrar_txt_a_json_si_existe():
+    """
+    Migración one-shot del formato viejo (txt) al nuevo (json).
+    Si el archivo .txt existe y el .json no, lo convierte y borra el txt.
+    """
+    ruta_txt = ARCHIVO_NO_ENCONTRADAS.with_suffix(".txt")
+    if not ruta_txt.exists():
+        return
+
+    try:
+        from datetime import datetime
+        hoy = datetime.now().isoformat()
+
+        lineas = ruta_txt.read_text(encoding="utf-8").splitlines()
+        data   = {
+            linea.strip().lower(): hoy
+            for linea in lineas
+            if linea.strip()
+        }
+
+        if data:
+            CARPETA_DATOS.mkdir(parents=True, exist_ok=True)
+            with open(ARCHIVO_NO_ENCONTRADAS, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+
+        ruta_txt.unlink(missing_ok=True)
+        print(f"[AppFinder] Migradas {len(data)} apps no encontradas al nuevo formato")
+
+    except Exception as e:
+        print("[AppFinder] Error migrando apps no encontradas:", e)
+
 
 def registrar_no_encontrada(nombre):
+    from datetime import datetime
     try:
-        nombre     = nombre.lower().strip()
-        existentes = cargar_no_encontradas()
-        if nombre not in existentes:
-            with open(ARCHIVO_NO_ENCONTRADAS, "a", encoding="utf-8") as f:
-                f.write(nombre + "\n")
+        nombre = nombre.lower().strip()
+        data   = _cargar_no_encontradas_raw()
+        if nombre not in data:
+            data[nombre] = datetime.now().isoformat()
+            _guardar_no_encontradas_raw(data)
     except Exception as e:
         print("Error registrando no encontrada:", e)
 
 
 def cargar_no_encontradas():
-    try:
-        with open(ARCHIVO_NO_ENCONTRADAS, "r", encoding="utf-8") as f:
-            return set(
-                linea.strip().lower()
-                for linea in f
-                if linea.strip()
-            )
-    except:
-        return set()
+    """
+    Devuelve el SET de nombres que siguen siendo no encontradas
+    (sin expirar). Las entradas expiradas se eliminan en este mismo
+    paso — así el archivo se limpia solo con el tiempo, sin necesitar
+    ningún proceso de mantenimiento manual.
+    """
+    from datetime import datetime, timedelta
+
+    data     = _cargar_no_encontradas_raw()
+    limite   = datetime.now() - timedelta(days=DIAS_EXPIRACION_NO_ENCONTRADAS)
+    vigentes = {}
+    cambio   = False
+
+    for nombre, timestamp_str in data.items():
+        try:
+            ts = datetime.fromisoformat(timestamp_str)
+            if ts >= limite:
+                vigentes[nombre] = timestamp_str
+            else:
+                cambio = True
+                print(f"[AppFinder] '{nombre}' expiró de no-encontradas "
+                      f"(registrada hace más de {DIAS_EXPIRACION_NO_ENCONTRADAS} días)")
+        except Exception:
+            # timestamp inválido → descartar la entrada por seguridad
+            cambio = True
+
+    if cambio:
+        _guardar_no_encontradas_raw(vigentes)
+
+    return set(vigentes.keys())
 
 
 def quitar_de_no_encontradas(nombre):
     try:
-        apps = cargar_no_encontradas()
-        if nombre in apps:
-            apps.discard(nombre)
-            with open(ARCHIVO_NO_ENCONTRADAS, "w", encoding="utf-8") as f:
-                for app in apps:
-                    f.write(app + "\n")
-    except:
+        data = _cargar_no_encontradas_raw()
+        if nombre in data:
+            del data[nombre]
+            _guardar_no_encontradas_raw(data)
+    except Exception:
         pass
+
+
+def _cargar_no_encontradas_raw():
+    """Carga el dict crudo {nombre: timestamp_iso} del JSON."""
+    try:
+        if not ARCHIVO_NO_ENCONTRADAS.exists():
+            return {}
+        with open(ARCHIVO_NO_ENCONTRADAS, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _guardar_no_encontradas_raw(data):
+    CARPETA_DATOS.mkdir(parents=True, exist_ok=True)
+    with open(ARCHIVO_NO_ENCONTRADAS, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
 
 # =========================================================
 # PREPARAR RESULTADO
@@ -661,6 +752,95 @@ def obtener_discos():
 # BUSCAR APP
 # =========================================================
 
+def guardar_alias_silencioso(alias, nombre_real):
+    """
+    Guarda un alias automáticamente sin interacción del usuario.
+    Se usa cuando la IA resuelve un nombre mal transcripto — así
+    la próxima vez que el usuario diga lo mismo se resuelve
+    directamente desde cache de aliases sin necesitar la IA.
+    """
+    try:
+        from aliases import agregar_alias
+        alias_limpio = alias.lower().strip()
+        nombre_real  = nombre_real.lower().strip()
+        if alias_limpio != nombre_real:
+            agregar_alias(alias_limpio, nombre_real)
+            print(f"[Alias] Guardado automáticamente: '{alias_limpio}' → '{nombre_real}'")
+    except Exception as e:
+        print(f"[Alias] Error guardando alias automático: {e}")
+
+
+def _resolver_nombre_con_ia(nombre):
+    """
+    Usa la IA híbrida (Groq/Ollama) para intentar identificar el
+    nombre real de una app a partir de cómo la dijo el usuario.
+
+    Útil cuando la transcripción de Whisper falla parcialmente:
+    "guttering waves" → "Wuthering Waves"
+    "es creem"        → "Steam"
+    "cromo"           → "Google Chrome"
+    "bloc de nota"    → "Notepad"
+
+    Devuelve el nombre sugerido en minúsculas, o None si la IA
+    no puede identificarlo o si no hay motores disponibles.
+
+    Se limita a 6 tokens de respuesta (solo el nombre) y usa
+    temperatura 0 para minimizar alucinaciones — preferimos que
+    devuelva None a que invente una app que no existe.
+    """
+    try:
+        from ia import _llamar_ollama
+
+        # se construye un listado de las apps conocidas en cache e
+        # índices para darle contexto a la IA — así puede comparar
+        # contra apps reales instaladas en vez de adivinar cualquier
+        # cosa. Se limita a 60 nombres para no saturar el contexto.
+        apps_conocidas = []
+        for clave in list(cache.keys())[:30]:
+            apps_conocidas.append(clave)
+        for clave in list(games_index.keys())[:15]:
+            if clave not in apps_conocidas:
+                apps_conocidas.append(clave)
+        for clave in list(apps_index.keys())[:15]:
+            if clave not in apps_conocidas:
+                apps_conocidas.append(clave)
+
+        contexto_apps = ", ".join(apps_conocidas[:60]) if apps_conocidas else ""
+
+        prompt = (
+            f"El usuario de un asistente de voz dijo el nombre de una app o "
+            f"videojuego, pero puede estar mal pronunciado o transcripto por "
+            f"reconocimiento de voz. "
+            f"Nombre dicho: \"{nombre}\". "
+            + (f"Apps instaladas conocidas: {contexto_apps}. " if contexto_apps else "")
+            + "¿Cuál es el nombre real más probable de esa app o juego? "
+            "Responde ÚNICAMENTE con el nombre, en minúsculas, sin explicaciones "
+            "ni puntuación. Si no podés identificarlo con certeza, responde: no sé"
+        )
+
+        respuesta = _llamar_ollama(prompt, timeout=6, num_predict=8, temperature=0.0)
+
+        if not respuesta:
+            return None
+
+        respuesta = respuesta.lower().strip().strip(".,;\"'")
+
+        # descartar respuestas de "no sé" o demasiado largas (la IA
+        # empezó a explicar en vez de dar solo el nombre)
+        if not respuesta or "no sé" in respuesta or "no se" in respuesta:
+            return None
+        if len(respuesta.split()) > 5:
+            return None
+        if respuesta == nombre.lower().strip():
+            return None  # la IA devolvió lo mismo, no ayuda
+
+        return respuesta
+
+    except Exception as e:
+        print(f"[IA] Error resolviendo nombre de app: {e}")
+        return None
+
+
 def buscar_app(nombre, fn_confirmar_rebuscar=None, fn_cancelado=None):
     global cache
 
@@ -794,6 +974,87 @@ def buscar_app(nombre, fn_confirmar_rebuscar=None, fn_cancelado=None):
             return None, False, None
 
     # =====================================================
+    # FALLBACK DE IA — antes de buscar en disco
+    # NUEVO: si no se encontró nada en cache ni en los índices
+    # (que es instantáneo), la IA intenta interpretar el nombre
+    # que dijo el usuario y sugerir el nombre real de la app.
+    # Si la IA lo reconoce, se hace una segunda pasada por cache
+    # e índices con el nombre corregido — evitando la búsqueda
+    # lenta en disco en la mayoría de casos donde el problema era
+    # solo cómo se pronunció o transcribió el nombre.
+    #
+    # Ejemplos donde esto ayuda:
+    #   "guttering waves" → "wuthering waves"
+    #   "es creem" → "steam"
+    #   "bloc de nota" → "notepad"
+    #   "cromo" → "google chrome"
+    #
+    # Si la IA no lo reconoce o falla, se sigue con la búsqueda
+    # en disco normalmente — es un fallback, no un reemplazo.
+    # =====================================================
+
+    nombre_ia = _resolver_nombre_con_ia(nombre)
+
+    if nombre_ia and nombre_ia != nombre:
+        print(f"[IA] Nombre sugerido: '{nombre}' → '{nombre_ia}'")
+        nombre_ia_limpio = limpiar_nombre(nombre_ia)
+
+        # segunda pasada por cache con el nombre de la IA
+        for clave, data in list(cache.items()):
+            clave_limpia = limpiar_nombre(clave)
+            if (
+                nombre_ia_limpio == clave_limpia
+                or nombre_ia_limpio in clave_limpia
+                or clave_limpia in nombre_ia_limpio
+            ):
+                ruta = data.get("ruta", "") if isinstance(data, dict) else str(data)
+                if ruta and os.path.exists(ruta):
+                    print(f"[IA] Encontrado en cache con nombre sugerido: {clave}")
+                    guardar_alias_silencioso(nombre, clave)
+                    if isinstance(data, dict):
+                        return data, True, clave
+                    return {"ruta": data, "procesos_cierre": [], "tipo": "normal"}, True, clave
+
+        # segunda pasada por games_index
+        for clave, data in list(games_index.items()):
+            try:
+                clave_limpia = limpiar_nombre(clave)
+                if (
+                    nombre_ia_limpio == clave_limpia
+                    or nombre_ia_limpio in clave_limpia
+                    or clave_limpia in nombre_ia_limpio
+                ):
+                    print(f"[IA] Encontrado en games index con nombre sugerido: {clave}")
+                    guardar_alias_silencioso(nombre, clave)
+                    return data, False, clave
+            except Exception:
+                pass
+
+        # segunda pasada por apps_index
+        for clave, data in list(apps_index.items()):
+            try:
+                if data.get("oculto", False):
+                    continue
+                clave_limpia = limpiar_nombre(clave)
+                if (
+                    nombre_ia_limpio == clave_limpia
+                    or nombre_ia_limpio in clave_limpia
+                    or clave_limpia in nombre_ia_limpio
+                ):
+                    ruta = data.get("ruta", "")
+                    if ruta and os.path.exists(ruta):
+                        print(f"[IA] Encontrado en apps index con nombre sugerido: {clave}")
+                        guardar_alias_silencioso(nombre, clave)
+                        return {"ruta": ruta, "procesos_cierre": [], "tipo": "normal"}, False, clave
+            except Exception:
+                pass
+
+        # si la IA sugirió algo pero no se encontró en índices,
+        # usar el nombre sugerido para la búsqueda en disco — puede
+        # ser más exacto que el original mal transcripto
+        nombre = nombre_ia
+
+    # =====================================================
     # BÚSQUEDA RÁPIDA
     # =====================================================
 
@@ -855,6 +1116,7 @@ def buscar_app(nombre, fn_confirmar_rebuscar=None, fn_cancelado=None):
 # CARGAR ARCHIVOS AL INICIO
 # =========================================================
 
+_migrar_txt_a_json_si_existe()  # one-shot: txt → json con timestamps
 cache       = cargar_cache()
 apps_index  = cargar_index()
 games_index = cargar_games_index()

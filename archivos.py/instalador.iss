@@ -1,122 +1,217 @@
 ; ============================================================
-; Instalador de AsistenteIA — Inno Setup
-;
-; Cómo usarlo:
-; 1. Compila primero con PyInstaller (ver asistente.spec) para
-;    generar la carpeta dist\AsistenteIA con el .exe adentro.
-; 2. Abre este archivo con Inno Setup Compiler (o usa ISCC.exe
-;    desde la terminal) y dale a "Compile" / "Build".
-; 3. El instalador queda en la carpeta Output\ de este script.
-;
-; NOTA SOBRE PERMISOS:
-; El instalador en sí NO pide admin para instalarse (PrivilegesRequired
-; = lowest), así que cualquier usuario puede instalarlo en su carpeta
-; de usuario sin UAC. Pero la app usa schtasks para el inicio
-; automático, lo cual SÍ necesita admin — ese permiso se pide aparte,
-; una sola vez, justo en el paso donde se crea la tarea programada
-; (ver la sección [Run] más abajo, con Flags: runascurrentuser
-; postinstall y el script de tareas con verb "runas").
+; Instalador de AsistenteIA — Inno Setup 6
 ; ============================================================
 
-#define MyAppName "AsistenteIA"
-#define MyAppVersion "1.0.2"
+#define MyAppName      "AsistenteIA"
+#define MyAppVersion   "1.2.0"
 #define MyAppPublisher "David"
-#define MyAppExeName "AsistenteIA.exe"
+#define MyAppExeName   "AsistenteIA.exe"
+#define MyDistDir      "dist\AsistenteIA"
 
-; Carpeta donde PyInstaller dejó el resultado (modo carpeta, no onefile)
-#define MyDistDir "dist\AsistenteIA"
-
+; ============================================================
 [Setup]
-AppId={{B6F2B6A0-6E6E-4B7B-9C9E-ASISTENTE0001}
+; ── identidad ───────────────────────────────────────────────
+; FIX: el AppId original terminaba en "ASISTENTE0001" — un GUID solo
+; puede contener dígitos hexadecimales (0-9 y A-F), y letras como
+; S, I, T, N no lo son. Eso hacía que el Compilador de Inno Setup
+; rechazara el AppId directamente. Se reemplaza por un GUID válido
+; — mismo valor de ahora en más, no lo cambies en próximas
+; versiones: el AppId es lo que usa Windows para identificar
+; instalaciones/actualizaciones de la MISMA app entre versiones.
+AppId={{B6F2B6A0-6E6E-4B7B-9C9E-A55157E10001}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
-DefaultDirName={autopf}\{#MyAppName}
+AppComments=Asistente de voz con IA para controlar tu PC
+VersionInfoVersion={#MyAppVersion}
+VersionInfoDescription={#MyAppName} Installer
+VersionInfoProductName={#MyAppName}
+
+; ── instalación ─────────────────────────────────────────────
+; Se instala en carpeta de usuario (no requiere admin para la
+; instalación base). Solo el paso opcional de inicio automático
+; pedirá UAC, una sola vez, por su cuenta.
+DefaultDirName={userappdata}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
-
-; El instalador en sí no requiere admin — solo el paso opcional
-; de inicio automático lo pedirá, una vez, por separado.
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 
+; ── salida ──────────────────────────────────────────────────
 OutputDir=Output
 OutputBaseFilename=AsistenteIA_Setup_{#MyAppVersion}
 Compression=lzma2
 SolidCompression=yes
-WizardStyle=modern
 
+; ── apariencia ──────────────────────────────────────────────
+WizardStyle=modern
+; Descomenta estas líneas si tenés imágenes de branding:
+; WizardImageFile=installer_banner.bmp        ; 164x314 px
+; WizardSmallImageFile=installer_logo.bmp     ; 55x55 px
+; SetupIconFile=icono.ico
+
+; ── comportamiento ──────────────────────────────────────────
+; Muestra la licencia y el README si existen en el proyecto
+; LicenseFile=LICENSE.txt
+; InfoAfterFile=LEEME.txt
+DisableWelcomePage=no
+DisableReadyPage=no
+ShowLanguageDialog=no
+AlwaysShowDirOnReadyPage=yes
+AlwaysShowGroupOnReadyPage=no
+
+; ── menú inicio ─────────────────────────────────────────────
 ; Cámbialo si tienes un .ico para el instalador
 ; SetupIconFile=icono.ico
 
+; ============================================================
 [Languages]
-; FIX: Spanish.isl solo existe si Inno Setup se instaló con el paquete
-; de idiomas adicionales — en instalaciones mínimas (la más común al
-; descargar el instalador oficial) no viene, y Inno Setup tiraba un
-; error en esta línea. Se usa el inglés por defecto (Default.isl),
-; que siempre está presente en cualquier instalación de Inno Setup.
-; Los mensajes del instalador son genéricos (Next, Install, Finish)
-; y no afectan el funcionamiento del asistente en sí.
+; Default.isl siempre está presente en cualquier instalación
+; de Inno Setup — no depende de paquetes de idioma opcionales.
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
-[Tasks]
-; Accesos directos — el usuario puede destildarlos en el asistente
-Name: "desktopicon"; Description: "Crear acceso directo en el &escritorio"; GroupDescription: "Accesos directos:"
-Name: "startupauto"; Description: "Iniciar {#MyAppName} automáticamente con Windows"; GroupDescription: "Inicio automático:"; Flags: unchecked
+; ============================================================
+[CustomMessages]
+; Textos personalizados en español para la UI del instalador
 
+; página de bienvenida
+english.WelcomeLabel1=Bienvenido al instalador de [name]
+english.WelcomeLabel2=Este asistente instalará [name/ver] en tu PC.%n%nCierra otras aplicaciones antes de continuar.
+
+; tareas
+english.CreateDesktopIcon=Crear acceso directo en el &escritorio
+english.StartupAutoLabel=Iniciar {#MyAppName} automáticamente al encender Windows
+english.StartupAdminNote=(requiere confirmar permisos de administrador)
+english.StartupGroupLabel=Inicio automático con Windows:
+english.ShortcutsGroupLabel=Accesos directos:
+
+; página de éxito
+english.FinishedLabel=La instalación de [name] ha finalizado correctamente.%n%nEl asistente se activa diciendo su nombre en voz alta.
+
+; ============================================================
+[Tasks]
+; ── accesos directos ────────────────────────────────────────
+Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:ShortcutsGroupLabel}"
+
+; ── inicio automático ───────────────────────────────────────
+; El ícono de escudo (🛡) en la descripción es la forma estándar
+; en Windows de indicar visualmente que una acción requiere
+; permisos de administrador — el mismo glifo que Windows usa en
+; botones de UAC del Panel de control y Configuración.
+Name: "startupauto"; Description: "{cm:StartupAutoLabel}  🛡  {cm:StartupAdminNote}"; GroupDescription: "{cm:StartupGroupLabel}"; Flags: unchecked
+
+; ============================================================
 [Files]
-; Copia TODO lo que generó PyInstaller (el .exe + sus dependencias)
+; Copia TODO lo que generó PyInstaller (exe + dependencias)
 Source: "{#MyDistDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
+; ============================================================
 [Icons]
+; Menú inicio
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
+
 Name: "{group}\Desinstalar {#MyAppName}"; Filename: "{uninstallexe}"
+
+; Escritorio (solo si se marcó la tarea)
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
+; ============================================================
 [Run]
-; Ofrece abrir el asistente justo al terminar de instalar
+; ── activar inicio automático (solo si se marcó) ────────────
+; El instalador hereda los permisos de admin cuando el usuario
+; los otorga durante la instalación, así que schtasks puede
+; crear la tarea con RunLevel HighestAvailable sin pedir UAC
+; de nuevo. Si la instalación fue sin admin (carpeta de usuario),
+; startup.py detecta la falta de permisos y eleva por su cuenta.
+Filename: "{app}\{#MyAppExeName}"; Parameters: "--activar-startup"; Tasks: startupauto; Flags: waituntilterminated; StatusMsg: "Configurando inicio automático con Windows..."
+
+; ── ofrecer abrir al terminar ────────────────────────────────
 Filename: "{app}\{#MyAppExeName}"; Description: "Abrir {#MyAppName} ahora"; Flags: nowait postinstall skipifsilent unchecked
 
-; Si el usuario marcó la casilla de inicio automático, se registra
-; la tarea programada de Windows. Esto SÍ requiere admin (schtasks
-; con RunLevel HighestAvailable, igual que ya hace startup.py), por
-; eso lleva el verbo "runas" — Windows pedirá confirmación de UAC
-; en este único paso, no para el resto de la instalación.
-;
-; FIX: el flag usado acá era "runascurrentuser", que en Inno Setup
-; significa exactamente lo CONTRARIO de lo que dice el comentario de
-; FIX: el instalador de Inno Setup ya corre elevado (requiere admin
-; para instalar en Program Files). En [Run], la ausencia del flag
-; "runascurrentuser" hace que el proceso hijo HEREDE esa elevación —
-; es exactamente lo que necesitamos para que schtasks pueda crear
-; la tarea con RunLevel HighestAvailable sin "Acceso denegado".
-; "runas" no es un flag válido en [Run] de Inno Setup (error de
-; compilación en línea 99). "runascurrentuser" hace lo contrario:
-; fuerza a correr SIN elevación, que era el bug original.
-; Sin ninguno de los dos flags, la elevación se hereda sola.
-Filename: "{app}\{#MyAppExeName}"; Parameters: "--activar-startup"; \
-    Tasks: startupauto; Flags: waituntilterminated; \
-    StatusMsg: "Configurando inicio automático..."
-
+; ============================================================
 [UninstallRun]
-; Al desinstalar, quita también la tarea programada si existía,
-; para no dejar basura en el Programador de tareas de Windows.
-;
-; FIX: antes esto llamaba a "schtasks /Delete" directamente. Borrar
-; una tarea registrada con privilegios elevados (RunLevel
-; HighestAvailable) puede requerir permisos de administrador, igual
-; que crearla — y no hay garantía de que el flag de elevación de
-; [Run] ("runas") esté soportado en esta sección [UninstallRun] de
-; Inno Setup. En vez de arriesgar ese supuesto, se llama al propio
-; .exe con "--desactivar-startup" (ver main.py), que internamente ya
-; sabe detectar la falta de permisos y elevar por su cuenta vía UAC
-; (ver _es_admin()/_ejecutar_elevado() en startup.py) — el mismo
-; mecanismo ya usado y probado para activar el inicio automático.
-Filename: "{app}\{#MyAppExeName}"; Parameters: "--desactivar-startup"; \
-    Flags: runhidden waituntilterminated; RunOnceId: "DelStartupTask"
+; Elimina la tarea programada al desinstalar, usando el propio
+; .exe con --desactivar-startup, que ya maneja los permisos
+; necesarios internamente (ver startup.py).
+Filename: "{app}\{#MyAppExeName}"; Parameters: "--desactivar-startup"; Flags: runhidden waituntilterminated; RunOnceId: "DelStartupTask"
 
+; ============================================================
 [UninstallDelete]
-; Borra archivos generados en uso (config.json, memoria.json, etc.)
-; OJO: esto borra los datos guardados del usuario (aliases, memoria)
-; al desinstalar. Si prefieres conservarlos, quita este bloque.
+; Borra los datos de usuario generados durante el uso.
+; Comentar estas líneas si se prefiere conservarlos al desinstalar.
 Type: filesandordirs; Name: "{localappdata}\AsistenteIA"
+
+; ============================================================
+[Code]
+{ Pascal Script — lógica adicional del instalador }
+
+{ ── página de bienvenida personalizada ──────────────────────
+  Agrega una nota de requisitos del sistema debajo del texto
+  estándar de bienvenida, sin reemplazar nada de lo que ya hay. }
+
+var
+  ReqLabel: TLabel;
+
+procedure InitializeWizard();
+var
+  WelcomePage: TWizardPage;
+begin
+  { nota de requisitos del sistema en la página de bienvenida }
+  ReqLabel              := TLabel.Create(WizardForm);
+  ReqLabel.Parent       := WizardForm.WelcomeLabel2.Parent;
+  ReqLabel.Left         := WizardForm.WelcomeLabel2.Left;
+  ReqLabel.Top          := WizardForm.WelcomeLabel2.Top + WizardForm.WelcomeLabel2.Height + 16;
+  ReqLabel.Width        := WizardForm.WelcomeLabel2.Width;
+  ReqLabel.AutoSize     := False;
+  ReqLabel.WordWrap     := True;
+  ReqLabel.Height       := 80;
+  ReqLabel.Caption      :=
+    'Requisitos:' + #13#10 +
+    '  • Windows 10 / 11' + #13#10 +
+    '  • Micrófono conectado y configurado' + #13#10 +
+    '  • Conexión a internet para configuración inicial';
+  ReqLabel.Font.Color   := $00888888;
+  ReqLabel.Font.Size    := 8;
+end;
+
+{ ── validación antes de instalar ────────────────────────────
+  Avisa si el asistente ya está corriendo para que el usuario
+  lo cierre antes de que el instalador sobreescriba los archivos. }
+
+function InitializeSetup(): Boolean;
+var
+  ResultCode: Integer;
+begin
+  Result := True;
+
+  { verificar si el proceso está corriendo }
+  if CheckForMutexes('AsistenteIA_Running') then
+  begin
+    if MsgBox(
+      'El Asistente IA parece estar ejecutándose.' + #13#10 +
+      'Por favor ciérralo antes de continuar con la instalación.' + #13#10#13#10 +
+      '¿Deseas continuar de todas formas?',
+      mbConfirmation, MB_YESNO
+    ) = IDNO then
+      Result := False;
+  end;
+end;
+
+{ ── mensaje de éxito personalizado ──────────────────────────
+  Reemplaza el texto genérico de "Setup was successful" con
+  instrucciones concretas de cómo usar el asistente. }
+
+procedure CurPageChanged(CurPageID: Integer);
+begin
+  if CurPageID = wpFinished then
+  begin
+    WizardForm.FinishedLabel.Caption :=
+      'La instalación de ' + '{#MyAppName}' + ' ha finalizado.' + #13#10#13#10 +
+      'Para usar el asistente:' + #13#10 +
+      '  1. Ábrelo desde el acceso directo o el menú Inicio' + #13#10 +
+      '  2. Espera a que termine de cargar' + #13#10 +
+      '  3. Di "Jarvis" para activarlo y empieza a dar comandos' + #13#10#13#10 +
+      'La primera vez te pedirá configurar tu API key de Groq' + #13#10 +
+      '(gratuita) para activar el modo con internet.';
+  end;
+end;

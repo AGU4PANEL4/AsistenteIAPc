@@ -143,6 +143,46 @@ def interpretar_confirmacion(respuesta, extras_si=None, extras_no=None, contexto
     return None
 
 
+# =========================================================
+# PEDIR UN DATO FALTANTE (sin reiniciar todo el flujo)
+# FIX/NUEVO: varios flujos de creación por voz (recordatorios,
+# temporizadores) fallaban directo y de forma genérica cuando algún
+# dato no se entendía (la fecha, la duración) — el usuario tenía que
+# repetir el comando COMPLETO desde cero, incluso las partes que sí
+# había dicho bien. Esta función es el reemplazo: pregunta solo por
+# el dato que falta, y si la respuesta es una palabra de cancelación
+# (ver session.es_cancelacion) — o si no se escuchó nada — devuelve
+# None para que quien llama pueda abandonar el flujo con elegancia
+# en vez de tratarlo como "no entendí, todo mal".
+# =========================================================
+
+def preguntar_dato(pregunta):
+    """
+    Habla `pregunta` y escucha la respuesta.
+
+    Devuelve:
+      el texto de la respuesta (str) tal cual se escuchó, o
+      None si el usuario canceló explícitamente (dijo una palabra
+      de cancelación) o si no se escuchó nada — quien llama debe
+      tratar ambos casos como "abandonar este dato/flujo", sin
+      reintentar más ni tratarlo como un error genérico.
+    """
+    from tts import hablar
+    from voice import escuchar
+    from session import es_cancelacion
+
+    hablar(pregunta)
+    respuesta = escuchar()
+
+    if not respuesta:
+        return None
+
+    if es_cancelacion(respuesta):
+        return None
+
+    return respuesta.strip()
+
+
 def elegir_de_lista(respuesta, opciones):
     """
     Interpreta la respuesta del usuario como una elección dentro de

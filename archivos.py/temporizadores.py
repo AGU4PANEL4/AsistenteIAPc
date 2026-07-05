@@ -115,7 +115,14 @@ def _hilo_temporizador(id_temporizador, momento, nombre):
 
     _guardar()
 
-    hablar(_mensaje_aviso(nombre))
+    # FIX/NUEVO: mismo patrón que en recordatorios.py — si el modo
+    # no molestar está activo, diferir el aviso en vez de interrumpir.
+    from no_molestar import modo_activo, registrar_aviso_diferido
+    mensaje_aviso = _mensaje_aviso(nombre)
+    if modo_activo():
+        registrar_aviso_diferido(mensaje_aviso)
+    else:
+        hablar(mensaje_aviso)
 
 
 def _programar_hilo(id_temporizador, momento, nombre):

@@ -597,14 +597,69 @@ def cerrar_app(nombre):
     # FIX: guardar alias si el nombre original es diferente
     guardar_alias_silencioso(nombre_original, nombre_cache)
 
+    # FIX/NUEVO: bug real — cuando se pide cerrar una app justo después
+    # de abrirla, capturar_pids_por_nombre() puede seguir corriendo en
+    # background (hasta 60s) y aún no haber guardado nada en
+    # "procesos_cierre". En ese caso, data.get("procesos_cierre")
+    # devuelve [] vacío, el loop de psutil no matchea nada, cerrados
+    # queda False y se reporta "no pude cerrar" — aunque la app SÍ
+    # está corriendo. La segunda vez ya funciona porque la captura ya
+    # terminó y los procesos ya están guardados.
+    #
+    # Solución: si procesos_cierre está vacío, construir la lista de
+    # procesos a cerrar de otras fuentes disponibles:
+    # 1. PIDs guardados en cache (si los hay) → cerrar por PID directo
+    # 2. Nombre del ejecutable de la ruta guardada → cerrar por nombre
+    # 3. Carpetas detectadas → cerrar por exe path (ya existía)
+    #
+    # Esto cubre el caso de la primera vez, y también el caso donde
+    # la app nunca tuvo captura de procesos (apps simples que se
+    # abrieron por ruta directa sin hilo de captura).
+
     procesos_guardados  = {p.lower() for p in data.get("procesos_cierre", [])}
     carpetas_detectadas = [c.lower() for c in data.get("carpetas_detectadas", [])]
+    pids_guardados      = set(data.get("pids", []))
+
+    # si no hay procesos guardados, inferir del ejecutable de la ruta
+    if not procesos_guardados and not pids_guardados:
+        ruta_str = data.get("ruta", "")
+        if ruta_str:
+            nombre_exe = Path(ruta_str).name.lower()
+            if nombre_exe:
+                procesos_guardados.add(nombre_exe)
+                print(f"[CERRAR] Sin procesos en cache, usando ejecutable: {nombre_exe}")
 
     print("CERRAR:", nombre_cache)
     print("PROCESOS:", procesos_guardados)
     print("CARPETAS:", carpetas_detectadas)
+    print("PIDs:", pids_guardados)
 
     cerrados = False
+
+    # primero intentar por PIDs guardados (más preciso que por nombre)
+    if pids_guardados:
+        for pid in list(pids_guardados):
+            try:
+                proc = psutil.Process(pid)
+                proc.terminate()
+                try:
+                    proc.wait(timeout=3)
+                except psutil.TimeoutExpired:
+                    proc.kill()
+                cerrados = True
+                print(f"[CERRAR PID] {pid}")
+            except psutil.NoSuchProcess:
+                cerrados = True  # ya no existe, considerar éxito
+            except (psutil.AccessDenied, Exception) as e:
+                try:
+                    subprocess.run(
+                        ["taskkill", "/F", "/PID", str(pid)],
+                        capture_output=True
+                    )
+                    cerrados = True
+                    print(f"[CERRAR PID TASKKILL] {pid}")
+                except Exception:
+                    pass
 
     for proc in psutil.process_iter(["pid", "name", "exe"]):
         try:

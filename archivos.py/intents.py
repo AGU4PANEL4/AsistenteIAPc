@@ -121,11 +121,112 @@ REFERENCIAS_ULTIMA_APP = {
 # DETECTAR INTENT
 # =========================================================
 
+def _extraer_minutos_no_molestar(texto):
+    """
+    Extrae la duración en minutos de frases como "por una hora",
+    "30 minutos", "2 horas", etc. Si no hay duración explícita,
+    devuelve 60 como valor por defecto razonable.
+    """
+    from tiempo_utils import parsear_duracion
+
+    segundos = parsear_duracion(texto)
+    if segundos:
+        return max(1, segundos // 60)
+
+    # valores en texto sin número explícito
+    DURACIONES_TEXTO = {
+        "un momento":     15,
+        "un rato":        30,
+        "media hora":     30,
+        "una hora":       60,
+        "dos horas":      120,
+        "tres horas":     180,
+        "toda la tarde":  180,
+        "toda la noche":  480,
+    }
+
+    texto = texto.lower().strip()
+    for frase, mins in DURACIONES_TEXTO.items():
+        if frase in texto:
+            return mins
+
+    return 60  # default: una hora
+
+
 def detectar_intent(comando):
 
     comando = normalizar(comando)
     comando = quitar_muletillas(comando)
     ultima  = memoria.get("ultima_app", "")
+
+    # =====================================================
+    # CADENAS EN EL MOMENTO — detección TEMPRANA
+    # Se hace AQUÍ, antes que cualquier otro intent, porque
+    # los patrones de abrir/cerrar/media capturan el conector
+    # como parte del nombre de app si llegan primero — ej:
+    # "abre discord y spotify" se convertía en abrir_app con
+    # valor "discord y spotify" en vez de detectarse como cadena.
+    #
+    # FIX: también soporta más de 2 partes (antes split(conector,1)
+    # limitaba a 2) — normalizando todos los conectores a un
+    # separador interno y dividiendo sin límite.
+    # =====================================================
+
+    _CONECTORES_CADENA = [
+        " y luego ", " y después ", " y despues ",
+        " luego ", " después ", " despues ", " y ",
+    ]
+    _SEP = "|||"
+
+    comando_norm_cadena = comando
+    tiene_conector      = False
+
+    for conector in _CONECTORES_CADENA:
+        if conector in comando_norm_cadena:
+            comando_norm_cadena = comando_norm_cadena.replace(conector, _SEP)
+            tiene_conector      = True
+
+    if tiene_conector:
+        partes = [p.strip() for p in comando_norm_cadena.split(_SEP) if p.strip()]
+
+        if len(partes) >= 2:
+            pasos_cadena    = []
+            valido          = True
+            ultimo_intent   = None
+            ultimo_verbo    = None  # prefijo para heredar, ej. "abre "
+
+            # prefijos de verbo que se pueden heredar a la siguiente parte
+            # cuando una parte es solo un nombre sin verbo (ej. "spotify"
+            # después de "abre discord y spotify")
+            VERBOS_HEREDABLES = {
+                "abrir_app":    "abre ",
+                "cerrar_app":   "cierra ",
+                "minimizar_app": "minimiza ",
+                "maximizar_app": "maximiza ",
+            }
+
+            for parte in partes:
+                intent_parte, valor_parte = detectar_intent(parte)
+
+                # si la parte no tiene intent pero hay un verbo heredable
+                # del paso anterior, intentar con el verbo prepuesto
+                if (not intent_parte or intent_parte in ("cadena", "ejecutar_macro")) \
+                        and ultimo_verbo:
+                    intent_parte, valor_parte = detectar_intent(ultimo_verbo + parte)
+
+                if not intent_parte or intent_parte in ("cadena", "ejecutar_macro"):
+                    valido = False
+                    break
+
+                pasos_cadena.append({"intent": intent_parte, "valor": valor_parte or ""})
+                ultimo_intent = intent_parte
+                ultimo_verbo  = VERBOS_HEREDABLES.get(intent_parte)
+
+            if valido and len(pasos_cadena) >= 2:
+                import json
+                return "cadena", json.dumps(pasos_cadena, ensure_ascii=False)
+        # si la cadena no es válida (alguna parte no reconocida),
+        # caer al resto del pipeline normalmente con el comando original
 
     # =====================================================
     # REFERENCIAS A ÚLTIMA APP
@@ -224,6 +325,17 @@ def detectar_intent(comando):
     YOUTUBE_PALABRAS = [
         "en youtube", "youtube", "en you tube"
     ]
+
+    # FIX: "busca actualizaciones" y variantes deben ir al actualizador,
+    # no a Google — se detectan ANTES del bloque genérico de búsqueda
+    # para que no caigan en buscar_google.
+    BUSCAR_ACTUALIZACION_FRASES = {
+        "busca actualizaciones", "buscar actualizaciones",
+        "busca una actualización", "buscar actualización",
+        "busca si hay actualizaciones",
+    }
+    if comando in BUSCAR_ACTUALIZACION_FRASES:
+        return "buscar_actualizacion", ""
 
     if comando.startswith(("busca ", "buscar ")):
         busqueda = re.sub(r"^buscar?\s+", "", comando).strip()
@@ -359,6 +471,57 @@ def detectar_intent(comando):
     # caso 3: sin tiempo explícito — "recuérdame que llame a mamá"
     # (sin info de cuándo en este patrón; se deja caer a la IA, que
     # puede preguntar o inferir mejor frases libres ambiguas)
+
+    # =====================================================
+    # RECORDATORIOS RECURRENTES
+    # Patrones:
+    #   "recuérdame cada día a las 8 que tome la pastilla"
+    #   "recuérdame todos los lunes a las 9 la reunión"
+    #   "recuérdame cada 2 horas revisar el correo"
+    #   "recuérdame cada 30 minutos tomar agua"
+    # Valor: "tipo|hora_o_segundos|dia|que"
+    # =====================================================
+
+    VERBOS_REC = (
+        r"recu[ée]rdame|ponme\s+un\s+recordatorio\s+recurrente|"
+        r"crea(?:r)?\s+un?\s+recordatorio\s+recurrente"
+    )
+
+    # diario: "recuérdame cada día a las 8 que X"
+    m = re.match(
+        rf"^(?:{VERBOS_REC})\s+cada\s+d[ií]a\s+a\s+las\s+(.+?)\s+que\s+(.+)$",
+        comando
+    )
+    if m:
+        return "crear_recordatorio_recurrente", f"diario|{m.group(1).strip()}||{m.group(2).strip()}"
+
+    # diario sin "que": "recuérdame cada día a las 8 tomar pastilla"
+    m = re.match(
+        rf"^(?:{VERBOS_REC})\s+cada\s+d[ií]a\s+a\s+las\s+(\S+)\s+(.+)$",
+        comando
+    )
+    if m:
+        return "crear_recordatorio_recurrente", f"diario|{m.group(1).strip()}||{m.group(2).strip()}"
+
+    # semanal: "recuérdame todos los lunes a las 9 que X"
+    DIAS_PATRON = "lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo"
+    m = re.match(
+        rf"^(?:{VERBOS_REC})\s+todos\s+los\s+({DIAS_PATRON})\s+a\s+las\s+(.+?)\s+(?:que\s+)?(.+)$",
+        comando
+    )
+    if m:
+        return "crear_recordatorio_recurrente", f"semanal|{m.group(2).strip()}|{m.group(1).strip()}|{m.group(3).strip()}"
+
+    # intervalo: "recuérdame cada 2 horas X" / "cada 30 minutos X"
+    m = re.match(
+        rf"^(?:{VERBOS_REC})\s+cada\s+(\d+)\s+(hora|horas|minuto|minutos|min)\s+(?:que\s+)?(.+)$",
+        comando
+    )
+    if m:
+        cantidad = int(m.group(1))
+        unidad   = m.group(2)
+        segundos = cantidad * (3600 if "hora" in unidad else 60)
+        return "crear_recordatorio_recurrente", f"intervalo|{segundos}||{m.group(3).strip()}"
 
     # =====================================================
     # LISTAR RECORDATORIOS
@@ -552,6 +715,45 @@ def detectar_intent(comando):
 
     if comando in ELIMINAR_ALIAS_SIN_NOMBRE:
         return "eliminar_alias", ""
+
+    # =====================================================
+    # MODO NO MOLESTAR
+    # =====================================================
+
+    NO_MOLESTAR_ACTIVAR = [
+        "no me molestes", "modo no molestar", "activa no molestar",
+        "silencia los avisos", "silencia las notificaciones",
+        "silencia los recordatorios", "silencia los temporizadores",
+        "no me interrumpas", "no me avises",
+        "modo concentración", "modo concentracion",
+        "modo silencio",
+    ]
+
+    for p in NO_MOLESTAR_ACTIVAR:
+        if comando.startswith(p) or comando == p:
+            # extraer duración de la frase si la hay
+            resto = comando[len(p):].strip()
+            minutos = _extraer_minutos_no_molestar(resto)
+            return "activar_no_molestar", str(minutos)
+
+    NO_MOLESTAR_DESACTIVAR = {
+        "desactiva no molestar", "desactivar no molestar",
+        "cancela no molestar", "ya puedes molestarme",
+        "ya puedes avisarme", "reactiva los avisos",
+        "sal del modo silencio", "sal del modo no molestar",
+        "desactiva el modo no molestar",
+    }
+
+    if comando in NO_MOLESTAR_DESACTIVAR:
+        return "desactivar_no_molestar", ""
+
+    NO_MOLESTAR_ESTADO = {
+        "estado no molestar", "tienes el modo no molestar",
+        "está activo el modo no molestar", "estás en modo no molestar",
+    }
+
+    if comando in NO_MOLESTAR_ESTADO:
+        return "estado_no_molestar", ""
 
     # =====================================================
     # MEDIA / REPRODUCCIÓN
@@ -776,6 +978,64 @@ def detectar_intent(comando):
         return "registrar_alias", "alias"
 
     # =====================================================
+    # GESTIONAR MACROS
+    # =====================================================
+
+    CREAR_MACRO = [
+        "crea una macro", "crear una macro", "crear macro",
+        "crea macro", "nueva macro", "agrega una macro",
+        "agrega macro", "añade macro", "nueva secuencia",
+    ]
+
+    for p in CREAR_MACRO:
+        if comando == p or comando.startswith(p + " "):
+            nombre = comando[len(p):].strip()
+            return "crear_macro", nombre
+
+    LISTAR_MACROS = [
+        "mis macros", "listar macros", "lista de macros",
+        "qué macros tengo", "que macros tengo",
+        "ver macros", "muestra mis macros",
+    ]
+
+    if comando in LISTAR_MACROS:
+        return "listar_macros", "macros"
+
+    ELIMINAR_MACRO = [
+        "elimina la macro ", "elimina macro ", "borra la macro ",
+        "borra macro ", "eliminar macro ", "borrar macro ",
+        "olvida la macro ", "olvida macro ",
+    ]
+
+    for p in ELIMINAR_MACRO:
+        if comando.startswith(p):
+            nombre = comando[len(p):].strip()
+            return "eliminar_macro", nombre
+
+    ELIMINAR_MACRO_SIN_NOMBRE = {
+        "elimina una macro", "elimina la macro", "elimina macro",
+        "borra una macro", "borra la macro", "borra macro",
+    }
+
+    if comando in ELIMINAR_MACRO_SIN_NOMBRE:
+        return "eliminar_macro", ""
+
+    # =====================================================
+    # ACTUALIZACIONES
+    # =====================================================
+
+    BUSCAR_ACTUALIZACION = {
+        "busca actualizaciones", "buscar actualizaciones",
+        "hay actualizaciones", "hay alguna actualización",
+        "hay alguna actualizacion", "comprueba actualizaciones",
+        "revisa actualizaciones", "actualiza el asistente",
+        "actualización disponible", "actualizacion disponible",
+    }
+
+    if comando in BUSCAR_ACTUALIZACION:
+        return "buscar_actualizacion", ""
+
+    # =====================================================
     # MINIMIZAR APP
     # =====================================================
 
@@ -851,5 +1111,23 @@ def detectar_intent(comando):
             nombre = traducir_alias(nombre)
             if nombre:
                 return "cerrar_app", nombre
+
+    # =====================================================
+    # MACROS GUARDADAS
+    # Se comprueba DESPUÉS de los intents estándar — si el usuario
+    # dice algo que coincide con una macro guardada, se activa.
+    # Se hace como import diferido para no crear dependencia circular
+    # (macros.py no importa intents.py, pero gestionar_macro.py sí).
+    # =====================================================
+
+    try:
+        from macros import obtener_macro
+        nombre_macro, pasos = obtener_macro(comando)
+        if pasos:
+            # se devuelve un intent especial con el nombre de la macro
+            # como valor — executor.py lo detecta y ejecuta los pasos
+            return "ejecutar_macro", nombre_macro
+    except Exception:
+        pass
 
     return None, None

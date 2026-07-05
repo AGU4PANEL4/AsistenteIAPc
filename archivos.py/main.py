@@ -1,30 +1,125 @@
 import sys
 import time
 import atexit
+import ctypes
 from logger import log
 from session import sesion, es_cancelacion, es_despedida
-from voice import escuchar, escuchar_wake_word, recalibrar
-from tts import hablar
-from wakeword import detectar_wakeword
-from intents import detectar_intent
-from ia import interpretar_con_ia, responder_charla
-from executor import ejecutar
-from app_finder import limpiar_cache_duplicados
-import threading
-from app_finder import *
-from recordatorios import reprogramar_pendientes as reprogramar_recordatorios
-from temporizadores import reprogramar_pendientes as reprogramar_temporizadores
-from gestor_ia import apagar_todo_al_salir
-from config import (
-    cargar_config,
-    guardar_config,
-    WAKE_WORD
-)
-from startup import (
-    activar_inicio_automatico,
-    desactivar_inicio_automatico,
-    startup_activado
-)
+
+# =====================================================
+# MANEJO DE CRASHES EN EL .EXE (sin consola)
+# Con console=False en el .spec, si el proceso muere por una
+# excepción no manejada, simplemente desaparece sin dejar
+# ningún rastro visible. En vez de redirigir stdout (que
+# interfiere con pygame/faster-whisper que llaman a fileno()),
+# se instala un hook global que:
+#   1. Escribe el traceback completo en el log persistente.
+#   2. Muestra un messagebox de Windows con el error, para
+#      que el usuario sepa qué pasó en vez de ver nada.
+# Cuando corre desde VS Code / terminal (frozen=False) este
+# bloque no se ejecuta — la consola sigue igual que siempre.
+# =====================================================
+
+if getattr(sys, "frozen", False):
+    import traceback
+    import ctypes as _ctypes
+
+    def _crash_handler(exc_type, exc_value, exc_tb):
+        texto = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
+        # escribir al log
+        try:
+            from logger import ARCHIVO_LOG
+            with open(ARCHIVO_LOG, "a", encoding="utf-8") as f:
+                f.write("\n[CRASH]\n" + texto + "\n")
+        except Exception:
+            pass
+        # mostrar messagebox (disponible porque tenemos tkinter)
+        try:
+            _ctypes.windll.user32.MessageBoxW(
+                0,
+                f"El asistente se cerró por un error:\n\n{exc_value}\n\n"
+                f"Revisa el log en:\n%LOCALAPPDATA%\\AsistenteIA\\asistente.log",
+                "AsistenteIA — Error",
+                0x10  # MB_ICONERROR
+            )
+        except Exception:
+            pass
+
+    sys.excepthook = _crash_handler
+
+# =====================================================
+# MUTEX DE INSTANCIA ÚNICA
+# Registra un mutex nombrado en Windows para que:
+# 1. El instalador (instalador.iss, CheckForMutexes) pueda
+#    detectar si el asistente está corriendo antes de instalar.
+# 2. Evitar que el usuario abra dos instancias del asistente
+#    al mismo tiempo (dos instancias peleando por el micrófono
+#    causaría comportamiento impredecible).
+# El mutex se libera automáticamente cuando el proceso termina.
+# =====================================================
+
+_MUTEX_NOMBRE = "AsistenteIA_Running"
+_mutex_handle = None
+
+try:
+    _mutex_handle = ctypes.windll.kernel32.CreateMutexW(None, False, _MUTEX_NOMBRE)
+    if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+        print(f"[Main] Ya hay una instancia del asistente corriendo. Cerrando.")
+        ctypes.windll.kernel32.CloseHandle(_mutex_handle)
+        sys.exit(1)
+except Exception as e:
+    print(f"[Main] No se pudo crear el mutex de instancia única: {e}")
+
+# =====================================================
+# VENTANA DE CARGA (splash)
+# FIX/NUEVO: antes, todo lo que sigue (imports pesados, preparar
+# Ollama, configurar Groq, etc.) corría en la consola sin nada
+# visible — en el .exe empaquetado (console=False) eso significaba
+# varios segundos donde el programa parecía no haber hecho nada. El
+# splash se muestra ACÁ, lo antes posible (antes de los imports
+# pesados de abajo), y main.py va actualizando su texto de estado en
+# cada etapa (ver splash.py) — se cierra recién cuando la interfaz
+# principal (ui.py) ya está lista para mostrarse.
+# =====================================================
+
+from splash import mostrar_splash, actualizar_splash, cerrar_splash
+mostrar_splash()
+actualizar_splash("Cargando módulos...")
+
+try:
+    from voice import escuchar, escuchar_wake_word, recalibrar
+    from tts import hablar
+    from wakeword import detectar_wakeword
+    from intents import detectar_intent
+    from ia import interpretar_con_ia, responder_charla
+    from executor import ejecutar
+    from app_finder import limpiar_cache_duplicados
+    import threading
+    from app_finder import *
+    from recordatorios import reprogramar_pendientes as reprogramar_recordatorios
+    from temporizadores import reprogramar_pendientes as reprogramar_temporizadores
+    from gestor_ia import apagar_todo_al_salir
+    from config import WAKE_WORD
+    from startup import (
+        activar_inicio_automatico,
+        desactivar_inicio_automatico,
+        startup_activado
+    )
+except Exception as _import_err:
+    cerrar_splash()
+    import traceback, ctypes as _ct
+    _ct.windll.user32.MessageBoxW(
+        0,
+        f"Error al cargar módulos del asistente:\n\n{_import_err}\n\n"
+        f"Revisa el log en:\n%LOCALAPPDATA%\\AsistenteIA\\asistente.log",
+        "AsistenteIA — Error de inicio",
+        0x10
+    )
+    try:
+        from logger import log
+        log.exception("Error de importación al arrancar")
+    except Exception:
+        pass
+    sys.exit(1)
 
 # NUEVO: si el modo híbrido de IA encendió Ollama como respaldo local
 # (porque no había internet en algún momento), esto garantiza que se
@@ -78,12 +173,16 @@ from verificacion import preparar_ia, precalentar_modelo_en_segundo_plano
 
 # =====================================================
 # CONFIGURAR GROQ (primer arranque)
-# NUEVO: si esta PC nunca configuró una GROQ_API_KEY (ej. es la
-# primera vez que un amigo prueba el proyecto en su propio equipo),
-# esto la pide de forma guiada: abre la página para crear una key
-# gratis, la pide por consola, y la valida con una llamada real antes
-# de guardarla — ver setup_groq.py para el detalle completo. Si la
-# key ya estaba configurada de antes, esta llamada no hace nada y
+# FIX/NUEVO: antes esto pedía la key por consola (input()), lo cual
+# se rompe en el .exe empaquetado (console=False, ver
+# asistente.spec) — sin consola, ese input() lanzaba una excepción
+# que tumbaba el arranque completo antes de mostrar nada. Ahora se
+# usa una ventana gráfica (ver setup_groq_gui.py) que abre la
+# página para crear la key, la pide, la valida con una llamada
+# real, y permite omitir el paso — mismo comportamiento que antes,
+# pero funcionando también sin consola.
+#
+# Si la key ya estaba configurada de antes, esto no hace nada y
 # retorna de inmediato, así que no se repite en cada arranque.
 #
 # Se hace ANTES de preparar_ia() (que instala/arranca Ollama) a
@@ -92,8 +191,9 @@ from verificacion import preparar_ia, precalentar_modelo_en_segundo_plano
 # normalmente mientras haya internet.
 # =====================================================
 
-from setup_groq import asegurar_groq_configurado
-asegurar_groq_configurado()
+actualizar_splash("Configurando IA...")
+from setup_groq_gui import asegurar_groq_configurado_gui
+asegurar_groq_configurado_gui()
 
 # =====================================================
 # CONFIG
@@ -102,7 +202,9 @@ asegurar_groq_configurado()
 TIMEOUT = 20
 ultimo_comando = time.time()
 
+actualizar_splash("Preparando IA local...")
 if not preparar_ia():
+    cerrar_splash()
     print("No se pudo preparar la IA.")
     time.sleep(10)
     exit()
@@ -130,16 +232,47 @@ if not preparar_ia():
 # así que solo se lanza si motor_a_usar() decidió que el motor a usar
 # es Ollama — si hay internet y se va a usar Groq, precalentar sería
 # encender Ollama para nada y luego apagarlo de inmediato.
+actualizar_splash("Verificando conexión...")
 from gestor_ia import motor_a_usar
 motor_inicial = motor_a_usar()
 
 if motor_inicial == "ollama":
-    # FIX: precalentar solo tiene sentido si se va a usar Ollama —
-    # ver el comentario completo anterior arriba.
     precalentar_modelo_en_segundo_plano()
 else:
     print(f"[IA] Motor seleccionado: Groq (hay internet). "
           f"Ollama apagado durante el arranque.")
+
+# =====================================================
+# INTERFAZ FLOTANTE
+# =====================================================
+
+actualizar_splash("Abriendo interfaz...")
+
+from ui import iniciar_ui
+from ui_estado import (
+    set_modo, set_motor_ia, set_wake_word, agregar_historial
+)
+
+iniciar_ui()
+cerrar_splash()
+set_motor_ia("Groq" if motor_inicial == "groq" else "Ollama")
+set_wake_word(WAKE_WORD)
+
+# =====================================================
+# ACTUALIZACIONES AUTOMÁTICAS
+# Lanza la verificación en background — consulta GitHub Releases
+# sin bloquear el arranque. Si hay versión nueva, descarga el
+# instalador en silencio y avisa al usuario cuando esté listo.
+# Ver actualizador.py para el detalle completo del flujo.
+# =====================================================
+
+from actualizador import (
+    iniciar_verificacion,
+    hay_actualizacion_pendiente,
+    obtener_tag_nuevo,
+    aplicar_actualizacion,
+)
+iniciar_verificacion()
 
 # =====================================================
 # INICIO
@@ -147,28 +280,19 @@ else:
 
 asegurar_archivos()
 
-config = cargar_config()
-
-if not config.get("pregunta_inicio_realizada", False):
-
-    respuesta = input(
-        "\n¿Deseas que el asistente inicie automáticamente con Windows? (s/n): "
-    ).strip().lower()
-
-    if respuesta in [
-        "s", "si", "sí", "ci", "cí",
-        "zi", "zí", "dale", "hazlo", "activalo"
-    ]:
-        activar_inicio_automatico()
-        config["inicio_automatico"] = True
-        print("Inicio automático activado.")
-    else:
-        desactivar_inicio_automatico()
-        config["inicio_automatico"] = False
-        print("Inicio automático desactivado.")
-
-    config["pregunta_inicio_realizada"] = True
-    guardar_config(config)
+# FIX/NUEVO: antes acá se preguntaba por consola (input()) si el
+# usuario quería inicio automático con Windows — mismo problema que
+# el setup de Groq: se rompe en el .exe empaquetado (sin consola) y
+# tumbaba el arranque. Se quita del todo, sin reemplazarla por una
+# ventana equivalente, porque ya no hace falta: el instalador
+# (instalador.iss) ofrece esta misma opción como una casilla durante
+# la instalación (ver [Tasks] "startupauto"), que internamente llama
+# a "AsistenteIA.exe --activar-startup" (ver el bloque de arriba) con
+# el mismo manejo de permisos de administrador. Si alguien lo omitió
+# ahí, puede activarlo en cualquier momento diciéndole al asistente
+# "activa el inicio automático" (ver activar_startup en
+# acciones_sistema.py / tools.py) — mismo mecanismo, sin duplicar
+# lógica ni pedir nada extra al arrancar.
 
 print("[Sistema] Iniciando asistente...")
 
@@ -332,17 +456,18 @@ while True:
         # =====================================================
 
         if not sesion["activa"]:
+            set_modo("escuchando")
             if not detectar_wakeword(comando, WAKE_WORD):
                 continue
 
             sesion["activa"] = True
             ultimo_comando   = time.time()
+            set_modo("hablando")
             hablar("¿En qué puedo ayudarte?")
 
             # FIX: recalibrar el ruido de fondo en cada nueva sesión,
             # no solo al arrancar el programa. Si el volumen del juego
             # o el ambiente cambió, esto evita que el micrófono se
-            # quede con un umbral desactualizado y corte palabras.
             recalibrar()
             continue
 
@@ -357,6 +482,7 @@ while True:
             hablar("Cancelado")
             sesion["activa"]          = False
             esperando_respuesta_aviso = False
+            set_modo("inactivo")
             continue
 
         # =====================================================
@@ -367,6 +493,7 @@ while True:
             hablar("Hasta luego")
             sesion["activa"]          = False
             esperando_respuesta_aviso = False
+            set_modo("inactivo")
             continue
 
         # =====================================================
@@ -375,6 +502,7 @@ while True:
 
         print("Escuché:", comando)
         ultimo_comando = time.time()
+        set_modo("procesando")
 
         # =====================================================
         # DETECCIÓN RÁPIDA
@@ -388,6 +516,13 @@ while True:
             print("Error intents:", e)
             intent_rapido = None
             valor_rapido  = None
+
+        # actualizar motor en la UI (puede cambiar si la conectividad cambió)
+        try:
+            from gestor_ia import motor_a_usar as _motor
+            set_motor_ia("Groq" if _motor() == "groq" else "Ollama")
+        except Exception:
+            pass
 
         # =====================================================
         # SISTEMA DE REGLAS
@@ -417,7 +552,21 @@ while True:
 
         if acciones is None:
             ultimo_comando = time.time()
-            hablar("Se está demorando mucho en responder, intenta de nuevo en un momento")
+            # FIX/NUEVO: antes el mensaje era genérico "Se está demorando
+            # mucho", que solo describe el caso de Ollama lento por GPU
+            # saturada. Ahora cubre también el caso donde Groq Y Ollama
+            # fallaron por motivos distintos (sin internet + Ollama caído,
+            # o cuota de Groq agotada + Ollama no instalado, etc.).
+            # El mensaje sigue siendo una sola frase para no confundir,
+            # pero distingue la causa real para que el usuario sepa qué
+            # esperar — "en un momento" aplica al caso de GPU ocupada,
+            # "revisa tu conexión" al de ambos motores caídos.
+            from conectividad import hay_internet
+            from verificacion import ollama_ejecutandose
+            if not hay_internet(forzar=True) and not ollama_ejecutandose():
+                hablar("No tengo forma de procesar eso ahora: no hay internet y Ollama no está disponible")
+            else:
+                hablar("Se está demorando mucho en responder, intenta de nuevo en un momento")
             continue
 
         # =====================================================
@@ -446,25 +595,29 @@ while True:
 
         if not acciones:
             respuesta_libre = None
+            ia_fallo        = False
             try:
                 respuesta_libre = responder_charla(comando)
             except Exception as e:
                 print("Error en charla:", e)
 
-            # FIX: reiniciar el timeout DESPUÉS de la respuesta, no antes,
-            # para que el tiempo de espera empiece a contar desde que el
-            # usuario ya escuchó la respuesta y no desde antes.
-            ultimo_comando = time.time()
+            if respuesta_libre is None:
+                from conectividad import hay_internet
+                from verificacion import ollama_ejecutandose
+                if not hay_internet(forzar=True) and not ollama_ejecutandose():
+                    respuesta_libre = ("No tengo forma de procesar eso ahora: "
+                                      "no hay internet y Ollama no está disponible")
+                    ia_fallo = True
 
-            # NUEVO: permitir_interrupcion=True — si el usuario empieza a
-            # hablar mientras el asistente todavía está diciendo esta
-            # respuesta, se corta de inmediato y lo que dijo se captura
-            # como el próximo comando (ver comando_pendiente más arriba),
-            # en vez de obligarlo a esperar que termine de hablar.
+            ultimo_comando = time.time()
+            set_modo("hablando")
+            agregar_historial(comando, respuesta_libre or "")
+
             comando_pendiente = hablar(
                 respuesta_libre or "No entendí qué quieres que haga, ¿puedes repetirlo?",
-                permitir_interrupcion=True
+                permitir_interrupcion=not ia_fallo,
             )
+            set_modo("escuchando")
             continue
 
         # =====================================================
@@ -473,6 +626,9 @@ while True:
 
         ejecuto = False
 
+        set_modo("procesando")
+        agregar_historial(comando)
+
         for intent, valor in acciones:
             try:
                 resultado = ejecutar(intent, valor)
@@ -480,6 +636,8 @@ while True:
                     ejecuto = True
             except Exception as e:
                 print("Error ejecutando:", e)
+
+        set_modo("hablando")
 
         # =====================================================
         # RESPUESTA FINAL
@@ -500,12 +658,31 @@ while True:
 
         ultimo_comando = time.time()
 
-        # NUEVO: mismo mecanismo de barge-in que en la respuesta de charla
-        # libre — "¿Algo más?" es el mensaje que más se repite en una
-        # conversación típica, así que es donde más se nota la espera de
-        # tener que aguantar a que termine de hablar antes de poder decir
-        # el siguiente comando.
+        # NUEVO: si hay una actualización descargada y lista, avisar
+        # antes de preguntar "¿Algo más?" — es el momento más natural
+        # (el usuario acaba de recibir una respuesta, no está en medio
+        # de una acción) y ya no bloquea nada porque el .exe ya está
+        # descargado en local.
+        if hay_actualizacion_pendiente():
+            tag = obtener_tag_nuevo() or "nueva versión"
+            respuesta_update = hablar(
+                f"Hay una actualización disponible: {tag}. ¿La instalo ahora?",
+                permitir_interrupcion=True,
+            )
+            if respuesta_update is None:
+                from voice import escuchar_confirmacion
+                respuesta_update = escuchar_confirmacion(timeout=8)
+            from voz_utils import interpretar_confirmacion
+            if interpretar_confirmacion(respuesta_update, contexto="¿Instalo la actualización?") is True:
+                hablar("Instalando actualización, el asistente se va a cerrar.")
+                aplicar_actualizacion()
+                # si aplicar_actualizacion() falla por algún motivo,
+                # el asistente sigue funcionando — no es un error grave
+            else:
+                hablar("Entendido, la instalaré en otro momento.")
+
         comando_pendiente = hablar("¿Algo más?", permitir_interrupcion=True)
+        set_modo("escuchando")
     except Exception as e:
         # FIX/NUEVO: antes, cualquier excepcion no manejada en
         # cualquier punto del loop principal tiraba abajo TODO el
@@ -521,4 +698,3 @@ while True:
             hablar("Tuve un error inesperado, sigamos")
         except Exception:
             pass
-        continue

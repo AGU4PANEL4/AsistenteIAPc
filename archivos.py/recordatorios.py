@@ -305,64 +305,110 @@ def calcular_momento(texto):
 # PROGRAMAR
 # =========================================================
 
-def _hilo_recordatorio(id_recordatorio, momento, texto):
+
+
+
+def _siguiente_momento_recurrente(recurrencia):
     """
-    Duerme hasta el momento exacto y luego avisa. Duerme en
-    tramos cortos (máx 30s) para no quedarse dormido de más si
-    el reloj del sistema cambia, y para poder revisar si el
-    recordatorio fue cancelado mientras tanto.
+    Calcula el próximo momento de disparo para un recordatorio
+    recurrente, a partir de ahora.
+    Tipos: "diario" | "semanal" | "intervalo"
+    """
+    ahora = datetime.now()
+    tipo  = recurrencia.get("tipo")
+
+    if tipo == "diario":
+        h, m      = map(int, recurrencia["hora"].split(":"))
+        candidato = ahora.replace(hour=h, minute=m, second=0, microsecond=0)
+        if candidato <= ahora:
+            candidato += timedelta(days=1)
+        return candidato
+
+    if tipo == "semanal":
+        h, m      = map(int, recurrencia["hora"].split(":"))
+        dia_obj   = recurrencia["dia"]
+        hoy       = ahora.weekday()
+        dias_diff = (dia_obj - hoy) % 7
+        if dias_diff == 0:
+            candidato = ahora.replace(hour=h, minute=m, second=0, microsecond=0)
+            if candidato <= ahora:
+                dias_diff = 7
+            else:
+                return candidato
+        return (ahora + timedelta(days=dias_diff)).replace(
+            hour=h, minute=m, second=0, microsecond=0
+        )
+
+    if tipo == "intervalo":
+        return ahora + timedelta(seconds=int(recurrencia["segundos"]))
+
+    return None
+
+
+def _hilo_recordatorio(id_recordatorio, momento, texto, recurrencia=None):
+    """
+    Duerme hasta el momento exacto y luego avisa. Si el recordatorio
+    es recurrente, calcula el siguiente momento y reprograma en vez
+    de eliminarse.
     """
     try:
         while True:
             with _lock_datos:
                 if str(id_recordatorio) not in _recordatorios:
-                    return  # fue cancelado
+                    return
 
             restante = (momento - datetime.now()).total_seconds()
-
             if restante <= 0:
                 break
-
             time.sleep(min(restante, 30))
 
         with _lock_datos:
-            existia = _recordatorios.pop(str(id_recordatorio), None) is not None
+            existia = str(id_recordatorio) in _recordatorios
+            if not existia:
+                return
 
-        if not existia:
-            return  # se canceló justo antes de dispararse
+            if recurrencia:
+                proximo = _siguiente_momento_recurrente(recurrencia)
+                if proximo:
+                    _recordatorios[str(id_recordatorio)]["momento"] = proximo.isoformat()
+                else:
+                    _recordatorios.pop(str(id_recordatorio), None)
+                    recurrencia = None
+            else:
+                _recordatorios.pop(str(id_recordatorio), None)
 
         _guardar()
 
-        hablar(f"Recordatorio: {texto}")
+        from no_molestar import modo_activo, registrar_aviso_diferido
+        mensaje_aviso = f"Recordatorio: {texto}"
+        if modo_activo():
+            registrar_aviso_diferido(mensaje_aviso)
+        else:
+            hablar(mensaje_aviso)
+
+        if recurrencia:
+            with _lock_datos:
+                info = _recordatorios.get(str(id_recordatorio))
+            if info:
+                proximo = datetime.fromisoformat(info["momento"])
+                _programar_hilo(id_recordatorio, proximo, texto, recurrencia)
 
     except Exception:
-        # FIX/NUEVO: este hilo corre en background (daemon) — si algo
-        # falla acá (ej. hablar() lanza una excepción inesperada), un
-        # hilo daemon que muere por una excepción no manejada lo hace
-        # en silencio total, sin que el usuario se entere de que su
-        # recordatorio nunca avisó. Se registra el error completo en
-        # el log persistente para poder diagnosticarlo después.
         log.exception(f"Error en el hilo del recordatorio '{texto}' (id={id_recordatorio})")
 
 
-def _programar_hilo(id_recordatorio, momento, texto):
+def _programar_hilo(id_recordatorio, momento, texto, recurrencia=None):
     hilo = threading.Thread(
         target=_hilo_recordatorio,
-        args=(id_recordatorio, momento, texto),
+        args=(id_recordatorio, momento, texto, recurrencia),
         daemon=True
     )
     hilo.start()
 
 
 def crear_recordatorio(cuando_texto, que_texto):
-    """
-    Crea un recordatorio nuevo. cuando_texto describe el tiempo
-    ("10 minutos", "3 pm", etc), que_texto es lo que se debe
-    recordar. Devuelve (éxito, mensaje).
-    """
-
+    """Crea un recordatorio simple (una sola vez)."""
     momento = calcular_momento(cuando_texto)
-
     if not momento:
         return False, None
 
@@ -371,7 +417,6 @@ def crear_recordatorio(cuando_texto, que_texto):
     with _lock_datos:
         id_recordatorio = _siguiente_id
         _siguiente_id  += 1
-
         _recordatorios[str(id_recordatorio)] = {
             "momento": momento.isoformat(),
             "texto":   que_texto,
@@ -380,14 +425,129 @@ def crear_recordatorio(cuando_texto, que_texto):
     _guardar()
     _programar_hilo(id_recordatorio, momento, que_texto)
 
-    # mensaje natural de confirmación
     ahora = datetime.now()
-    if momento.date() == ahora.date():
-        cuando_decir = f"hoy a las {momento.strftime('%H:%M')}"
-    else:
-        cuando_decir = f"mañana a las {momento.strftime('%H:%M')}"
-
+    cuando_decir = (
+        f"hoy a las {momento.strftime('%H:%M')}"
+        if momento.date() == ahora.date()
+        else f"mañana a las {momento.strftime('%H:%M')}"
+    )
     return True, f"Listo, te recordaré {que_texto} {cuando_decir}"
+
+
+_DIAS_SEMANA = {
+    "lunes": 0, "martes": 1, "miércoles": 2, "miercoles": 2,
+    "jueves": 3, "viernes": 4, "sábado": 5, "sabado": 5, "domingo": 6,
+}
+
+
+def _parsear_hora_recurrente(texto):
+    """Extrae la hora en formato HH:MM de un texto libre."""
+    import re
+    texto = texto.lower().strip()
+    media  = "y media" in texto
+    cuarto = "y cuarto" in texto
+    texto  = texto.replace("y media", "").replace("y cuarto", "").strip()
+
+    m = re.search(r"\b(\d{1,2}):(\d{2})\b", texto)
+    if m:
+        h, mn = int(m.group(1)), int(m.group(2))
+        if media: mn = (mn + 30) % 60
+        return f"{h:02d}:{mn:02d}"
+
+    m = re.search(r"\b(\d{1,2})\s*(am|pm|a\.m\.|p\.m\.)?\b", texto)
+    if m:
+        h  = int(m.group(1))
+        pm = m.group(2) and "p" in m.group(2)
+        am = m.group(2) and "a" in m.group(2)
+        if pm and h < 12: h += 12
+        if am and h == 12: h = 0
+        mn = 30 if media else (15 if cuarto else 0)
+        return f"{h:02d}:{mn:02d}"
+
+    return None
+
+
+# FIX/NUEVO: envoltorios públicos de _parsear_hora_recurrente() y
+# _DIAS_SEMANA — acciones_sistema.py necesita validar estos mismos
+# datos para poder preguntar de nuevo solo por lo que falta (ver
+# crear_recordatorio_recurrente_accion) sin duplicar la lógica de
+# parseo acá. Se agregan estas dos funciones en vez de que ese
+# módulo importe directamente los nombres con "_" (pensados como
+# detalle interno de este archivo), manteniendo una sola fuente de
+# verdad para qué cuenta como hora/día válido.
+
+def hora_recurrente_valida(texto):
+    """True si `texto` se puede interpretar como una hora válida
+    para un recordatorio diario o semanal."""
+    return _parsear_hora_recurrente(texto or "") is not None
+
+
+def dia_semana_valido(texto):
+    """True si `texto` es un día de la semana reconocido."""
+    return (texto or "").lower().strip() in _DIAS_SEMANA
+
+
+def crear_recordatorio_recurrente(tipo_rec, que_texto, hora_texto=None,
+                                   dia_semana=None, segundos=None):
+    """Crea un recordatorio recurrente."""
+    global _siguiente_id
+
+    recurrencia = {"tipo": tipo_rec}
+
+    if tipo_rec == "diario":
+        hora = _parsear_hora_recurrente(hora_texto or "")
+        if not hora:
+            return False, "No entendí a qué hora quieres el recordatorio diario"
+        recurrencia["hora"] = hora
+
+    elif tipo_rec == "semanal":
+        hora = _parsear_hora_recurrente(hora_texto or "")
+        if not hora:
+            return False, "No entendí a qué hora quieres el recordatorio semanal"
+        dia = _DIAS_SEMANA.get((dia_semana or "").lower().strip())
+        if dia is None:
+            return False, f"No reconocí el día '{dia_semana}'"
+        recurrencia["hora"] = hora
+        recurrencia["dia"]  = dia
+
+    elif tipo_rec == "intervalo":
+        if not segundos or segundos <= 0:
+            return False, "No entendí cada cuánto quieres el recordatorio"
+        recurrencia["segundos"] = segundos
+    else:
+        return False, "Tipo de recurrencia no reconocido"
+
+    proximo = _siguiente_momento_recurrente(recurrencia)
+    if not proximo:
+        return False, "No pude calcular el próximo momento del recordatorio"
+
+    with _lock_datos:
+        id_rec        = _siguiente_id
+        _siguiente_id += 1
+        _recordatorios[str(id_rec)] = {
+            "momento":     proximo.isoformat(),
+            "texto":       que_texto,
+            "recurrencia": recurrencia,
+        }
+
+    _guardar()
+    _programar_hilo(id_rec, proximo, que_texto, recurrencia)
+
+    if tipo_rec == "diario":
+        desc = f"todos los días a las {recurrencia['hora']}"
+    elif tipo_rec == "semanal":
+        nombre_dia = [k for k, v in _DIAS_SEMANA.items() if v == recurrencia["dia"]][0]
+        desc = f"todos los {nombre_dia} a las {recurrencia['hora']}"
+    else:
+        segs = recurrencia["segundos"]
+        if segs >= 3600 and segs % 3600 == 0:
+            n = segs // 3600
+            desc = f"cada {n} hora" + ("s" if n > 1 else "")
+        else:
+            n = segs // 60
+            desc = f"cada {n} minuto" + ("s" if n > 1 else "")
+
+    return True, f"Listo, te recordaré {que_texto} {desc}"
 
 
 def listar_recordatorios():
@@ -523,24 +683,31 @@ def cancelar_por_palabra_clave(palabras_clave):
 # =========================================================
 
 def reprogramar_pendientes():
-    pendientes_vencidos = []
+    pendientes_vencidos   = []
+    pendientes_recurrentes_vencidos = []
 
     with _lock_datos:
         items = list(_recordatorios.items())
 
     for id_str, info in items:
         try:
-            momento = datetime.fromisoformat(info["momento"])
+            momento     = datetime.fromisoformat(info["momento"])
+            recurrencia = info.get("recurrencia")
         except Exception:
             continue
 
         if momento <= datetime.now():
-            pendientes_vencidos.append((id_str, info["texto"]))
+            if recurrencia:
+                # recurrente vencido — avisa que se perdió y reprograma
+                pendientes_recurrentes_vencidos.append((id_str, info["texto"], recurrencia))
+            else:
+                # simple vencido — avisa y elimina
+                pendientes_vencidos.append((id_str, info["texto"]))
         else:
-            _programar_hilo(int(id_str), momento, info["texto"])
+            # futuro — reprogramar hilo normalmente
+            _programar_hilo(int(id_str), momento, info["texto"], recurrencia)
 
-    # los que ya vencieron mientras el asistente estaba apagado
-    # se avisan ahora mismo, una sola vez, y se eliminan
+    # simples vencidos: eliminar y avisar
     for id_str, texto in pendientes_vencidos:
         with _lock_datos:
             _recordatorios.pop(id_str, None)
@@ -550,8 +717,24 @@ def reprogramar_pendientes():
         for _, texto in pendientes_vencidos:
             hablar(f"Mientras estaba apagado, tenía que recordarte: {texto}")
 
+    # recurrentes vencidos: avisar, reprogramar al siguiente momento
+    for id_str, texto, recurrencia in pendientes_recurrentes_vencidos:
+        proximo = _siguiente_momento_recurrente(recurrencia)
+        if proximo:
+            with _lock_datos:
+                _recordatorios[id_str]["momento"] = proximo.isoformat()
+            _guardar()
+            _programar_hilo(int(id_str), proximo, texto, recurrencia)
+            hablar(f"Mientras estaba apagado, me perdí el recordatorio de {texto}. "
+                   f"El próximo será a las {proximo.strftime('%H:%M')}")
+        else:
+            with _lock_datos:
+                _recordatorios.pop(id_str, None)
+            _guardar()
+
 # =========================================================
 # CARGAR AL IMPORTAR
 # =========================================================
 
 _cargar()
+            

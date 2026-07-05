@@ -1,4 +1,12 @@
 from acciones import *
+from acciones_sistema import (
+    activar_startup, desactivar_startup, estado_startup,
+    crear_recordatorio_accion, listar_recordatorios_accion,
+    cancelar_recordatorio_accion, crear_temporizador_accion,
+    listar_temporizadores_accion, cancelar_temporizador_accion,
+    activar_no_molestar, desactivar_no_molestar, estado_no_molestar,
+    crear_recordatorio_recurrente_accion,
+)
 from media_control import (
     media_pausa_reanuda,
     media_siguiente,
@@ -9,6 +17,8 @@ from media_control import (
     media_volumen_exacto,
 )
 from registrar_alias import registrar_alias_manual
+from gestionar_macro import crear_macro_guiado, listar_macros_accion, eliminar_macro_guiado
+from actualizador import buscar_actualizacion_ahora
 
 TOOLS = {
     "abrir_app":           abrir_app,
@@ -26,6 +36,7 @@ TOOLS = {
     "crear_recordatorio":  crear_recordatorio_accion,
     "listar_recordatorios": listar_recordatorios_accion,
     "cancelar_recordatorio": cancelar_recordatorio_accion,
+    "crear_recordatorio_recurrente": crear_recordatorio_recurrente_accion,
     "crear_temporizador":   crear_temporizador_accion,
     "listar_temporizadores": listar_temporizadores_accion,
     "cancelar_temporizador": cancelar_temporizador_accion,
@@ -40,4 +51,10 @@ TOOLS = {
     "media_volumen_exacto": media_volumen_exacto,
     # alias
     "registrar_alias":     registrar_alias_manual,
+    # macros
+    "crear_macro":         crear_macro_guiado,
+    "listar_macros":       listar_macros_accion,
+    "eliminar_macro":      eliminar_macro_guiado,
+    # actualizaciones
+    "buscar_actualizacion": buscar_actualizacion_ahora,
 }
