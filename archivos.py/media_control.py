@@ -81,7 +81,7 @@ def _smtc_es_navegador(sesion):
     try:
         aumid = (sesion.source_app_user_model_id or "").lower()
         return any(frag in aumid for frag in NAVEGADORES_AUMID_FRAGMENTOS)
-    except:
+    except Exception:
         return False
 
 
@@ -102,7 +102,7 @@ async def _smtc_buscar_sesion_navegador(sesiones):
             info = s.get_playback_info()
             if info and info.playback_status == _SmtcStatus.PLAYING:
                 return s
-        except:
+        except Exception:
             pass
 
     return candidatos[0]
@@ -126,7 +126,7 @@ async def _smtc_accion_async(accion, nombre_app=None):
                 try:
                     info   = s.get_playback_info()
                     estado = info.playback_status if info else "?"
-                except:
+                except Exception:
                     estado = "?"
                 resumen.append(f"{aumid}={estado}")
             print(f"[SMTC] Buscando '{nombre_app}' — {len(sesiones)} sesión(es): {resumen}")
@@ -149,7 +149,7 @@ async def _smtc_accion_async(accion, nombre_app=None):
                     if nombre_limpio in aumid:
                         sesion_obj = s
                         break
-                except:
+                except Exception:
                     pass
 
         # FIX: el bug real era acá. Si el usuario pidió una app
@@ -179,7 +179,7 @@ async def _smtc_accion_async(accion, nombre_app=None):
     if not sesion_obj and not nombre_app:
         try:
             sesion_obj = manager.get_current_session()
-        except:
+        except Exception:
             sesion_obj = None
 
         if not sesion_obj and sesiones:
@@ -355,7 +355,7 @@ def _obtener_pids_por_nombre(nombre_app):
             pname = _limpiar((proc.info["name"] or "").replace(".exe", ""))
             if nombre_limpio == pname or nombre_limpio in pname or pname in nombre_limpio:
                 pids.add(proc.info["pid"])
-        except:
+        except Exception:
             pass
 
     # por cache (procesos_cierre y carpetas)
@@ -383,7 +383,7 @@ def _obtener_pids_por_nombre(nombre_app):
                     exe  = (proc.info.get("exe") or "").lower()
                     if name in procesos or any(c in exe for c in carpetas):
                         pids.add(proc.info["pid"])
-                except:
+                except Exception:
                     pass
             break
 
@@ -443,7 +443,7 @@ def _buscar_ventana_youtube():
             proc   = psutil.Process(pid)
             if proc.name().lower() in NAVEGADORES:
                 resultado.append(hwnd)
-        except:
+        except Exception:
             pass
 
     win32gui.EnumWindows(callback, None)
@@ -457,13 +457,13 @@ def _enfocar_ventana(hwnd):
         else:
             win32gui.ShowWindow(hwnd, win32con.SW_SHOW)
         win32gui.SetForegroundWindow(hwnd)
-    except:
+    except Exception:
         try:
             ctypes.windll.user32.ShowWindow(hwnd, 9)
             ctypes.windll.user32.BringWindowToTop(hwnd)
             ctypes.windll.user32.AllowSetForegroundWindow(-1)
             ctypes.windll.user32.SetForegroundWindow(hwnd)
-        except:
+        except Exception:
             pass
     time.sleep(0.6)
 
@@ -507,7 +507,7 @@ def _buscar_ventanas_reproductor(nombre_app):
             pname = _limpiar((proc.info["name"] or "").replace(".exe", ""))
             if nombre_limpio == pname or nombre_limpio in pname or pname in nombre_limpio:
                 pids_app.add(proc.info["pid"])
-        except:
+        except Exception:
             pass
 
     if not pids_app:
@@ -522,7 +522,7 @@ def _buscar_ventanas_reproductor(nombre_app):
             if titulo in TITULOS_IGNORAR:
                 return
             ventanas.append(hwnd)
-        except:
+        except Exception:
             pass
 
     win32gui.EnumWindows(callback, None)

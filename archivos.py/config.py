@@ -66,7 +66,7 @@ def cargar_config():
 
         return data
 
-    except:
+    except Exception:
         guardar_config(VALORES_DEFECTO)
         return dict(VALORES_DEFECTO)
 

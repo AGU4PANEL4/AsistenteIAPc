@@ -29,6 +29,7 @@ from pathlib import Path
 from difflib import SequenceMatcher
 
 from logger import log
+from voz_utils import UMBRAL_SIMILITUD_DIFUSA
 
 # =========================================================
 # ARCHIVO
@@ -117,7 +118,8 @@ def listar_macros():
 def obtener_macro(nombre):
     """
     Busca una macro por nombre exacto primero, luego por similitud
-    difusa (mismo umbral de 0.80 que usa wakeword.py) — así decir
+    difusa (mismo umbral que usa wakeword.py, ver
+    voz_utils.UMBRAL_SIMILITUD_DIFUSA) — así decir
     "modo gaming" puede activar "modo juego" si se parecen suficiente,
     igual que la tolerancia ya existente para la wake word.
 
@@ -142,7 +144,7 @@ def obtener_macro(nombre):
             mejor_ratio  = ratio
             mejor_nombre = clave
 
-    if mejor_ratio >= 0.80:
+    if mejor_ratio >= UMBRAL_SIMILITUD_DIFUSA:
         return mejor_nombre, copia[mejor_nombre]
 
     return None, None

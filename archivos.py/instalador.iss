@@ -37,6 +37,29 @@ DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 
+; ── cierre/reapertura automática de la app ─────────────────
+; FIX/NUEVO: AppMutex le dice a Inno Setup CUÁL es el mutex de
+; nuestra propia app (ver instancia.py) para su mecanismo NATIVO de
+; "cerrar aplicaciones en uso" — esto es una red de seguridad además
+; de que actualizador.py ya libera este mismo mutex a mano justo
+; antes de lanzar el instalador (ver _instalar_y_cerrar): si por
+; algún motivo el mutex NO se liberó a tiempo (ej. se corrió el
+; instalador manualmente con el asistente abierto), Setup lo detecta
+; solo y lo cierra, en vez de solo avisar y dejar que el usuario
+; decida "continuar de todas formas" con el riesgo de sobreescribir
+; archivos en uso.
+;
+; CloseApplications=force -> cierra la app automáticamente sin
+;   preguntar (fuerza el cierre si hace falta) en vez de mostrar la
+;   página de "Files In Use" pidiendo confirmación — necesario para
+;   que la actualización automática (/VERYSILENT) sea 100%
+;   desatendida.
+; RestartApplications=yes -> vuelve a abrir lo que cerró, una vez
+;   termina de instalar.
+AppMutex=AsistenteIA_Running
+CloseApplications=force
+RestartApplications=yes
+
 ; ── salida ──────────────────────────────────────────────────
 OutputDir=Output
 OutputBaseFilename=AsistenteIA_Setup_{#MyAppVersion}
@@ -125,8 +148,20 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 ; startup.py detecta la falta de permisos y eleva por su cuenta.
 Filename: "{app}\{#MyAppExeName}"; Parameters: "--activar-startup"; Tasks: startupauto; Flags: waituntilterminated; StatusMsg: "Configurando inicio automático con Windows..."
 
-; ── ofrecer abrir al terminar ────────────────────────────────
+; ── ofrecer abrir al terminar (instalación interactiva) ─────
 Filename: "{app}\{#MyAppExeName}"; Description: "Abrir {#MyAppName} ahora"; Flags: nowait postinstall skipifsilent unchecked
+
+; ── reabrir automáticamente (SOLO auto-actualización silenciosa) ──
+; FIX/NUEVO: el Run de arriba usa "skipifsilent" — a propósito, para
+; NO reabrir solo cuando alguien corre el instalador a mano en modo
+; silencioso sin querer reabrir nada. Pero la auto-actualización
+; (ver actualizador.py, /VERYSILENT /RESTARTAPPLICATIONS) SÍ necesita
+; que el asistente vuelva a abrirse solo, sin que el usuario tenga
+; que hacerlo manualmente después. Check: WizardSilent hace que esta
+; línea EXISTA solo para el caso silencioso — nunca se ejecuta en una
+; instalación interactiva normal (ahí ya está el Run de arriba, con
+; su casilla opcional).
+Filename: "{app}\{#MyAppExeName}"; Flags: nowait; Check: WizardSilent
 
 ; ============================================================
 [UninstallRun]
@@ -184,7 +219,20 @@ var
 begin
   Result := True;
 
-  { verificar si el proceso está corriendo }
+  { FIX/NUEVO: en una auto-actualización (/VERYSILENT), el mutex ya
+    se libera a mano justo antes de lanzar este instalador (ver
+    instancia.liberar() en actualizador.py._instalar_y_cerrar), así
+    que en ese caso CheckForMutexes ya va a devolver False de todas
+    formas. Pero si alguien corre el instalador manualmente en modo
+    silencioso (ej. un script propio) con el asistente sí abierto de
+    verdad, no tiene sentido mostrar un MsgBox que nadie va a ver —
+    WizardSilent() evita preguntarle nada a un usuario que no está
+    mirando; AppMutex + CloseApplications=force (ver [Setup] arriba)
+    ya se encargan de cerrar la app de todas formas antes de instalar. }
+  if WizardSilent() then
+    Exit;
+
+  { verificar si el proceso está corriendo (solo instalación interactiva) }
   if CheckForMutexes('AsistenteIA_Running') then
   begin
     if MsgBox(

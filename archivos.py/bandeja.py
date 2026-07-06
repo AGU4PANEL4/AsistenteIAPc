@@ -3,7 +3,7 @@
 recuperar la ventana o cerrar el asistente de verdad cuando quedó
 "en segundo plano" (ventana oculta, pero el proceso sigue vivo).
 
-FIX/NUEVO: antes, el botón × de ui.py solo ocultaba la ventana
+FIX/NUEVO: antes, el botón x de ui.py solo ocultaba la ventana
 (root.withdraw()) y no había NINGUNA forma de volver a mostrarla ni
 de cerrar el asistente de verdad sin matar el proceso a mano desde
 el Administrador de tareas. Ahora, mientras el asistente está

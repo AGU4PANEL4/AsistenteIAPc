@@ -82,7 +82,7 @@ def cargar_memoria():
 
         return data
 
-    except:
+    except Exception:
         return json.loads(json.dumps(VALORES_DEFECTO))  # copia profunda
 
 # =========================================================

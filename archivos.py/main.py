@@ -54,20 +54,20 @@ if getattr(sys, "frozen", False):
 # 2. Evitar que el usuario abra dos instancias del asistente
 #    al mismo tiempo (dos instancias peleando por el micrófono
 #    causaría comportamiento impredecible).
-# El mutex se libera automáticamente cuando el proceso termina.
+#
+# FIX/NUEVO: la creación/liberación del mutex se movió a su propio
+# módulo (instancia.py) — actualizador.py necesita poder LIBERARLO
+# manualmente justo antes de lanzar el instalador de una
+# actualización (ver el comentario detallado en instancia.py y en
+# actualizador.py._instalar_y_cerrar), y este archivo no puede
+# importar algo de main.py sin crear un import circular.
 # =====================================================
 
-_MUTEX_NOMBRE = "AsistenteIA_Running"
-_mutex_handle = None
+import instancia
 
-try:
-    _mutex_handle = ctypes.windll.kernel32.CreateMutexW(None, False, _MUTEX_NOMBRE)
-    if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
-        print(f"[Main] Ya hay una instancia del asistente corriendo. Cerrando.")
-        ctypes.windll.kernel32.CloseHandle(_mutex_handle)
-        sys.exit(1)
-except Exception as e:
-    print(f"[Main] No se pudo crear el mutex de instancia única: {e}")
+if not instancia.crear():
+    print("[Main] Ya hay una instancia del asistente corriendo. Cerrando.")
+    sys.exit(1)
 
 # =====================================================
 # VENTANA DE CARGA (splash)
@@ -172,6 +172,43 @@ if "--desactivar-startup" in sys.argv:
 from verificacion import preparar_ia, precalentar_modelo_en_segundo_plano
 
 # =====================================================
+# ACTUALIZACIONES AUTOMÁTICAS
+# Se verifica ACÁ, mientras el splash todavía está visible y ANTES
+# de configurar Groq/Ollama — si hay una actualización y el usuario
+# decide instalarla, no tiene sentido perder tiempo preparando IA
+# que se va a descartar apenas el instalador reemplace esta versión.
+#
+# FIX/NUEVO: antes esto corría en background durante toda la sesión
+# y avisaba por VOZ en medio de la conversación (ver actualizador.py
+# para el detalle completo del rediseño). Ahora se resuelve acá, con
+# una ventana (ver setup_actualizacion_gui.py), antes de que la
+# sesión de voz siquiera empiece.
+#
+# FIX/NUEVO: además, esto solo corre si el proceso está "frozen"
+# (el .exe empaquetado) — antes corría igual corriendo desde código
+# fuente (ej. python main.py en VS Code), lo cual era confuso durante
+# el desarrollo: el config.json comparte la misma carpeta de datos
+# que la instalación real, así que un chequeo de versión mientras se
+# programa podía disparar un aviso de "actualización disponible" sin
+# relación con el código que se está editando en ese momento. No
+# tiene sentido descargar/instalar un .exe de todas formas sobre un
+# entorno de desarrollo.
+# =====================================================
+
+if getattr(sys, "frozen", False):
+    actualizar_splash("Buscando actualizaciones...")
+    from actualizador import verificar_actualizacion_arranque
+    if not verificar_actualizacion_arranque(callback_progreso=actualizar_splash):
+        # el asistente se está cerrando para instalar la actualización
+        # (en la práctica, verificar_actualizacion_arranque() ya hizo
+        # sys.exit(0) antes de llegar acá — esto es solo un resguardo)
+        cerrar_splash()
+        sys.exit(0)
+else:
+    print("[Actualizador] Corriendo desde código fuente — se omite la "
+          "verificación de actualizaciones.")
+
+# =====================================================
 # CONFIGURAR GROQ (primer arranque)
 # FIX/NUEVO: antes esto pedía la key por consola (input()), lo cual
 # se rompe en el .exe empaquetado (console=False, ver
@@ -203,11 +240,30 @@ TIMEOUT = 20
 ultimo_comando = time.time()
 
 actualizar_splash("Preparando IA local...")
-if not preparar_ia():
+if not preparar_ia(callback_progreso=actualizar_splash):
     cerrar_splash()
     print("No se pudo preparar la IA.")
-    time.sleep(10)
-    exit()
+    # FIX/NUEVO: antes esto solo hacía print() + sleep(10) — invisible
+    # en el .exe empaquetado (console=False), así que el usuario solo
+    # veía el splash cerrarse y el proceso desaparecer sin ninguna
+    # explicación. Mismo patrón que el crash handler y el error de
+    # imports de más arriba: un messagebox de Windows que sí se ve
+    # sin consola, explicando qué pasó y dónde revisar el log.
+    log.error("preparar_ia() falló durante el arranque — el asistente "
+              "no puede continuar sin Ollama ni Groq disponibles")
+    try:
+        ctypes.windll.user32.MessageBoxW(
+            0,
+            "No se pudo preparar la IA local (Ollama).\n\n"
+            "Revisa tu conexión a internet e intenta abrir el "
+            "asistente de nuevo.\n\nSi el problema sigue, revisa el "
+            "log en:\n%LOCALAPPDATA%\\AsistenteIA\\asistente.log",
+            "AsistenteIA — Error de inicio",
+            0x10  # MB_ICONERROR
+        )
+    except Exception:
+        pass
+    sys.exit(1)
 
 # FIX/NUEVO: gestor_ia.motor_a_usar() decide si usar Groq u Ollama
 # según haya internet, y de paso apaga/enciende Ollama para que quede
@@ -253,26 +309,21 @@ from ui_estado import (
     set_modo, set_motor_ia, set_wake_word, agregar_historial
 )
 
-iniciar_ui()
+# FIX/NUEVO: antes se llamaba iniciar_ui() (que crea su PROPIO
+# tk.Tk() en su propio hilo para el orbe flotante) ANTES de
+# cerrar_splash() — durante ese instante convivían dos roots de
+# Tkinter en dos hilos distintos (el del splash, todavía cerrando, y
+# el de la UI principal, recién creado). Ahora se cierra el splash
+# PRIMERO y se espera (cerrar_splash ya hace join(timeout=2)) a que
+# su root termine de destruirse del todo antes de crear el de la UI
+# principal — nunca quedan dos roots de Tkinter vivos al mismo
+# tiempo. El costo es un instante sin ninguna ventana visible entre
+# que el splash desaparece y el orbe aparece, imperceptible en la
+# práctica frente al riesgo que evita.
 cerrar_splash()
+iniciar_ui()
 set_motor_ia("Groq" if motor_inicial == "groq" else "Ollama")
 set_wake_word(WAKE_WORD)
-
-# =====================================================
-# ACTUALIZACIONES AUTOMÁTICAS
-# Lanza la verificación en background — consulta GitHub Releases
-# sin bloquear el arranque. Si hay versión nueva, descarga el
-# instalador en silencio y avisa al usuario cuando esté listo.
-# Ver actualizador.py para el detalle completo del flujo.
-# =====================================================
-
-from actualizador import (
-    iniciar_verificacion,
-    hay_actualizacion_pendiente,
-    obtener_tag_nuevo,
-    aplicar_actualizacion,
-)
-iniciar_verificacion()
 
 # =====================================================
 # INICIO
@@ -658,28 +709,13 @@ while True:
 
         ultimo_comando = time.time()
 
-        # NUEVO: si hay una actualización descargada y lista, avisar
-        # antes de preguntar "¿Algo más?" — es el momento más natural
-        # (el usuario acaba de recibir una respuesta, no está en medio
-        # de una acción) y ya no bloquea nada porque el .exe ya está
-        # descargado en local.
-        if hay_actualizacion_pendiente():
-            tag = obtener_tag_nuevo() or "nueva versión"
-            respuesta_update = hablar(
-                f"Hay una actualización disponible: {tag}. ¿La instalo ahora?",
-                permitir_interrupcion=True,
-            )
-            if respuesta_update is None:
-                from voice import escuchar_confirmacion
-                respuesta_update = escuchar_confirmacion(timeout=8)
-            from voz_utils import interpretar_confirmacion
-            if interpretar_confirmacion(respuesta_update, contexto="¿Instalo la actualización?") is True:
-                hablar("Instalando actualización, el asistente se va a cerrar.")
-                aplicar_actualizacion()
-                # si aplicar_actualizacion() falla por algún motivo,
-                # el asistente sigue funcionando — no es un error grave
-            else:
-                hablar("Entendido, la instalaré en otro momento.")
+        # FIX/NUEVO: antes acá se revisaba hay_actualizacion_pendiente()
+        # y, si había una actualización lista, se avisaba por VOZ antes
+        # de "¿Algo más?" — una interrupción fuera de contexto en medio
+        # de la conversación normal. Ese chequeo ahora se hace ANTES de
+        # que la sesión de voz empiece, con una ventana durante el
+        # splash (ver verificar_actualizacion_arranque en
+        # actualizador.py), así que ya no hace falta nada acá.
 
         comando_pendiente = hablar("¿Algo más?", permitir_interrupcion=True)
         set_modo("escuchando")

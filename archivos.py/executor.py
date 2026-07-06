@@ -81,10 +81,6 @@ def ejecutar(intent, valor):
 
         return True
 
-    intent     = str(intent).lower().strip()
-    valor      = str(valor).strip()
-    valor_norm = valor.lower()
-
     # =====================================================
     # ALIAS
     # =====================================================

@@ -17,6 +17,18 @@ NUMEROS_PALABRA = {
 }
 
 # =========================================================
+# UMBRAL DE SIMILITUD DIFUSA
+# FIX/NUEVO: el mismo umbral (0.80) para considerar dos textos
+# "suficientemente parecidos" vivía duplicado como número mágico en
+# wakeword.py (detectar_wakeword) y en macros.py (obtener_macro) —
+# fácil de olvidar ajustar en los dos lugares si algún día se decide
+# afinarlo. Ahora vive en un solo sitio, y ambos módulos lo importan
+# de acá en vez de repetir el literal 0.80 cada uno por su cuenta.
+# =========================================================
+
+UMBRAL_SIMILITUD_DIFUSA = 0.80
+
+# =========================================================
 # CONFIRMACIÓN SÍ/NO
 # FIX: antes de esto, acciones.py tenía 4 listas SI distintas (y una
 # NO) repartidas en distintas funciones de confirmación, cada una con

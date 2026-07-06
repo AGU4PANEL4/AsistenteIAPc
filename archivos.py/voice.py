@@ -1,8 +1,41 @@
 import concurrent.futures
+import threading
 import numpy as np
 import speech_recognition as sr
 from faster_whisper import WhisperModel
 from logger import log
+
+# =========================================================
+# LOCK DE MICRÓFONO
+# FIX/NUEVO: hay varios hilos que pueden necesitar sr.Microphone() al
+# mismo tiempo — el más notorio: cancelacion.py arranca un hilo que
+# escucha en loop (escuchar_rapido) MIENTRAS el hilo principal sigue
+# trabajando, y ese trabajo puede a su vez terminar pidiendo audio
+# también (ej. abrir_app() -> app_finder.buscar_app() ->
+# confirmar_rebuscar() -> escuchar_confirmacion(), TODO esto todavía
+# dentro de la ventana entre iniciar_cancelacion() y
+# detener_cancelacion() en acciones_apps.py). Sin ninguna protección,
+# dos hilos entrando a sr.Microphone() al mismo tiempo puede romper el
+# stream de PyAudio por debajo (el mismo tipo de crash — "Audio source
+# must be entered before listening" / "'NoneType' object has no
+# attribute 'close'" — que ya se documentó y arregló puntualmente en
+# cancelacion.py/tts.py para otros casos, pero que ahí solo se evitó
+# con timing cuidadoso entre esos dos módulos puntuales, sin cubrir
+# esta combinación real que sí puede pasar en uso normal).
+#
+# Este lock es la protección de fondo, a nivel del recurso mismo (el
+# micrófono), en vez de depender de que cada nuevo flujo que se
+# agregue al proyecto recuerde coordinarse manualmente con los demás.
+# Cualquier función de acá que abra sr.Microphone() adquiere este
+# lock PRIMERO — si otro hilo ya lo tiene, simplemente espera su
+# turno en vez de competir por el mismo stream de audio. El lock se
+# suelta apenas se termina de CAPTURAR el audio (antes de
+# transcribirlo) — transcribir no necesita el micrófono, así que
+# soltarlo temprano deja el turno libre para el siguiente hilo lo
+# antes posible, en vez de tenerlo esperando de más sin necesidad.
+# =========================================================
+
+_lock_microfono = threading.Lock()
 
 # =========================================================
 # RECOGNIZER - configurar una sola vez
@@ -30,8 +63,9 @@ recognizer.non_speaking_duration    = 0.5
 
 
 def _calibrar(duracion=2):
-    with sr.Microphone() as source:
-        recognizer.adjust_for_ambient_noise(source, duration=duracion)
+    with _lock_microfono:
+        with sr.Microphone() as source:
+            recognizer.adjust_for_ambient_noise(source, duration=duracion)
 
 
 # FIX/NUEVO: _calibrar() corre acá mismo, a nivel de módulo, apenas
@@ -569,16 +603,17 @@ def _construir_hotwords():
 
 def escuchar_wake_word(wake_word):
 
-    with sr.Microphone() as source:
-        print("Escuchando...")
-        try:
-            audio = recognizer.listen(
-                source,
-                timeout=5,
-                phrase_time_limit=4
-            )
-        except sr.WaitTimeoutError:
-            return ""
+    with _lock_microfono:
+        with sr.Microphone() as source:
+            print("Escuchando...")
+            try:
+                audio = recognizer.listen(
+                    source,
+                    timeout=5,
+                    phrase_time_limit=4
+                )
+            except sr.WaitTimeoutError:
+                return ""
 
     prompt = f"Comandos de voz en español. Palabra de activación: {wake_word}."
 
@@ -624,16 +659,17 @@ def escuchar_wake_word(wake_word):
 
 def escuchar_confirmacion(timeout=8):
 
-    with sr.Microphone() as source:
-        print("Escuchando...")
-        try:
-            audio = recognizer.listen(
-                source,
-                timeout=timeout,
-                phrase_time_limit=4
-            )
-        except sr.WaitTimeoutError:
-            return ""
+    with _lock_microfono:
+        with sr.Microphone() as source:
+            print("Escuchando...")
+            try:
+                audio = recognizer.listen(
+                    source,
+                    timeout=timeout,
+                    phrase_time_limit=4
+                )
+            except sr.WaitTimeoutError:
+                return ""
 
     prompt = "Responde sí, no, confirmo, dale, cancela u otra confirmación corta."
 
@@ -645,18 +681,19 @@ def escuchar_confirmacion(timeout=8):
 
 def escuchar():
 
-    with sr.Microphone() as source:
-        print("Escuchando...")
-        try:
-            audio = recognizer.listen(
-                source,
-                timeout=5,
-                # FIX: 8s cortaba comandos un poco más largos
-                # ("registra alias para tal app y tal otro alias").
-                phrase_time_limit=12
-            )
-        except sr.WaitTimeoutError:
-            return ""
+    with _lock_microfono:
+        with sr.Microphone() as source:
+            print("Escuchando...")
+            try:
+                audio = recognizer.listen(
+                    source,
+                    timeout=5,
+                    # FIX: 8s cortaba comandos un poco más largos
+                    # ("registra alias para tal app y tal otro alias").
+                    phrase_time_limit=12
+                )
+            except sr.WaitTimeoutError:
+                return ""
 
     # FIX: se construye la lista de hotwords en CADA llamada, no una
     # sola vez al importar el módulo — los índices de apps/juegos se
@@ -676,19 +713,20 @@ def escuchar():
 
 def escuchar_rapido(timeout=2, phrase_time_limit=3):
 
-    with sr.Microphone() as source:
-        try:
-            audio = recognizer.listen(
-                source,
-                timeout=timeout,
-                phrase_time_limit=phrase_time_limit
-            )
-        except sr.WaitTimeoutError:
-            return ""
+    with _lock_microfono:
+        with sr.Microphone() as source:
+            try:
+                audio = recognizer.listen(
+                    source,
+                    timeout=timeout,
+                    phrase_time_limit=phrase_time_limit
+                )
+            except sr.WaitTimeoutError:
+                return ""
 
     try:
         return _transcribir(audio)
-    except:
+    except Exception:
         return ""
 
 # =========================================================
@@ -709,13 +747,14 @@ def escuchar_rapido(timeout=2, phrase_time_limit=3):
 # =========================================================
 
 def detectar_voz_breve(timeout=1):
-    with sr.Microphone() as source:
-        try:
-            recognizer.listen(
-                source,
-                timeout=timeout,
-                phrase_time_limit=0.3
-            )
-            return True
-        except sr.WaitTimeoutError:
-            return False
+    with _lock_microfono:
+        with sr.Microphone() as source:
+            try:
+                recognizer.listen(
+                    source,
+                    timeout=timeout,
+                    phrase_time_limit=0.3
+                )
+                return True
+            except sr.WaitTimeoutError:
+                return False

@@ -1,5 +1,7 @@
 from difflib import SequenceMatcher
 
+from voz_utils import UMBRAL_SIMILITUD_DIFUSA
+
 
 # =========================================================
 # SIMILITUD
@@ -32,7 +34,7 @@ def detectar_wakeword(texto, wakeword):
     if len(palabras_wake) == 1:
 
         for palabra in texto.split():
-            if parecido(palabra, wakeword) > 0.80:
+            if parecido(palabra, wakeword) > UMBRAL_SIMILITUD_DIFUSA:
                 return True
 
     # =====================================================
@@ -47,7 +49,7 @@ def detectar_wakeword(texto, wakeword):
 
         for i in range(len(palabras_texto) - n + 1):
             fragmento = " ".join(palabras_texto[i:i + n])
-            if parecido(fragmento, wakeword) > 0.80:
+            if parecido(fragmento, wakeword) > UMBRAL_SIMILITUD_DIFUSA:
                 return True
 
     # =====================================================
@@ -55,7 +57,7 @@ def detectar_wakeword(texto, wakeword):
     # por si el usuario solo dijo el wakeword
     # =====================================================
 
-    if parecido(texto, wakeword) > 0.80:
+    if parecido(texto, wakeword) > UMBRAL_SIMILITUD_DIFUSA:
         return True
 
     return False

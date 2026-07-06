@@ -22,7 +22,7 @@ def _loop_cancelacion():
             if texto and es_cancelacion(texto):
                 print(f"[Cancelación] Detectado: '{texto}'")
                 sesion["cancelar"] = True
-        except:
+        except Exception:
             pass
 
 def iniciar_cancelacion():

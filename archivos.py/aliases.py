@@ -1,5 +1,6 @@
 import json
 import os
+import threading
 from pathlib import Path
 
 # =========================================================
@@ -8,6 +9,23 @@ from pathlib import Path
 
 CARPETA_DATOS   = Path(os.environ["LOCALAPPDATA"]) / "AsistenteIA"
 ARCHIVO_ALIASES = CARPETA_DATOS / "aliases.json"
+
+# =========================================================
+# LOCK
+# FIX/NUEVO: agregar_alias()/eliminar_alias() hacen un ciclo
+# leer-modificar-guardar (cargar_aliases() -> mutar el dict en
+# memoria -> guardar_aliases() -> reemplazar el global `aliases`)
+# que antes no tenía NINGÚN lock — a diferencia de macros.py y
+# temporizadores.py, que sí protegen exactamente este mismo patrón
+# con threading.Lock(). Si dos llamadas a agregar_alias()/
+# eliminar_alias() llegaran a solaparse desde hilos distintos (hoy
+# no pasa en la práctica, pero nada en el código lo impedía), la más
+# lenta en guardar terminaría pisando en disco el cambio que la otra
+# ya había hecho, perdiéndolo en silencio — el mismo tipo de "lost
+# update" ya documentado y resuelto en temporizadores.py._guardar().
+# =========================================================
+
+_lock = threading.Lock()
 
 # =========================================================
 # ALIASES INICIALES
@@ -75,7 +93,7 @@ def cargar_aliases():
     try:
         with open(ARCHIVO_ALIASES, "r", encoding="utf-8") as f:
             return json.load(f)
-    except:
+    except Exception:
         return dict(ALIASES_INICIALES)
 
 # =========================================================
@@ -95,12 +113,13 @@ def guardar_aliases(data):
 
 def agregar_alias(alias, nombre_real):
 
-    data = cargar_aliases()
-    data[alias.lower().strip()] = nombre_real
-    guardar_aliases(data)
+    with _lock:
+        data = cargar_aliases()
+        data[alias.lower().strip()] = nombre_real
+        guardar_aliases(data)
 
-    global aliases
-    aliases = data
+        global aliases
+        aliases = data
 
     print(f"[Alias] '{alias}' → '{nombre_real}' guardado")
 
@@ -110,20 +129,21 @@ def agregar_alias(alias, nombre_real):
 
 def eliminar_alias(alias):
 
-    data  = cargar_aliases()
-    alias = alias.lower().strip()
+    with _lock:
+        data  = cargar_aliases()
+        alias = alias.lower().strip()
 
-    if alias in data:
-        del data[alias]
-        guardar_aliases(data)
+        if alias in data:
+            del data[alias]
+            guardar_aliases(data)
 
-        global aliases
-        aliases = data
+            global aliases
+            aliases = data
 
-        print(f"[Alias] Eliminado: '{alias}'")
-        return True
+            print(f"[Alias] Eliminado: '{alias}'")
+            return True
 
-    return False
+        return False
 
 # =========================================================
 # CONSULTAR

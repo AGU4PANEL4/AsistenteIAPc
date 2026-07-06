@@ -1,21 +1,43 @@
 """
-Sistema de actualización automática via GitHub Releases.
+Sistema de actualización automática vía GitHub Releases.
 
-Flujo:
-1. Al arrancar, consulta la API de GitHub para obtener la última
-   release disponible (sin bloquear el arranque — corre en un hilo).
-2. Compara el tag de la release con la versión guardada en config.json.
-3. Si hay versión nueva, descarga el instalador .exe en background.
-4. Cuando termina la descarga, avisa por voz y espera confirmación
-   del usuario antes de ejecutar el instalador y cerrar el asistente.
+Hay DOS caminos distintos para llegar a una actualización, cada uno
+con la forma de avisar que tiene sentido para su contexto:
 
-El asistente sigue funcionando normalmente mientras descarga en
-background — la notificación llega recién cuando el .exe ya está
-listo, no mientras todavía está bajando.
+1. VERIFICACIÓN AUTOMÁTICA AL ARRANCAR (verificar_actualizacion_arranque)
+   Se ejecuta UNA vez, de forma síncrona, mientras el splash de carga
+   está visible (ver main.py) — consulta GitHub (un solo request,
+   rápido) y, si hay una versión nueva, muestra un diálogo visual
+   preguntando si se quiere actualizar ahora mismo (ver
+   setup_actualizacion_gui.py). Si el usuario confirma, descarga el
+   instalador (con el progreso visible en el splash) y lo ejecuta,
+   cerrando el asistente ANTES de terminar de arrancar el resto (IA,
+   UI, etc.) — no tiene sentido cargar todo eso si el proceso se va
+   a cerrar de todas formas para actualizarse.
+
+   FIX/NUEVO: antes esto corría en background durante TODA la sesión
+   y avisaba por VOZ, interrumpiendo la conversación normal justo
+   después de que el asistente respondiera algo, antes de preguntar
+   "¿Algo más?" — una interrupción fuera de contexto para algo que
+   no tiene nada que ver con lo que el usuario le pidió. Ahora se
+   resuelve ANTES de que la sesión de voz siquiera empiece, con una
+   ventana visual, igual que las otras decisiones de arranque (Groq,
+   Ollama).
+
+2. BÚSQUEDA MANUAL POR VOZ (buscar_actualizacion_ahora)
+   El usuario pide explícitamente "busca actualizaciones" en medio
+   de una sesión — acá SÍ tiene sentido responder por voz, porque el
+   usuario mismo inició el pedido por voz. Descarga en background
+   (para no dejar al asistente "mudo" mientras se descarga el
+   instalador) y, cuando termina, el propio hilo de descarga habla
+   directamente para avisar y pedir confirmación — mismo patrón ya
+   usado por recordatorios.py/temporizadores.py para avisos que
+   surgen desde un hilo en background, sin necesitar que main.py
+   esté revisando ningún estado compartido en su loop principal.
 """
 
-import os
 import sys
+import time
 import threading
 import tempfile
 import subprocess
@@ -114,7 +136,7 @@ def _hay_version_nueva(tag_remoto, tag_local):
     if not tag_local:
         # sin versión local registrada → siempre hay "algo nuevo"
         # para poder guardar la versión actual sin ofrecer actualizar
-        return False  # ver _verificar_primera_vez
+        return False  # ver el manejo de "primera vez" en cada camino
 
     if tag_remoto == tag_local:
         return False
@@ -138,16 +160,33 @@ def _hay_version_nueva(tag_remoto, tag_local):
 
 # =========================================================
 # DESCARGA
+# Síncrona — quien la llama decide si esperarla desde el hilo
+# principal (arranque, ve verificar_actualizacion_arranque) o desde
+# un hilo aparte (búsqueda manual, ver _flujo_manual_en_hilo).
 # =========================================================
 
-def _descargar_exe(url, callback_listo, callback_error):
+def _descargar_exe(url, callback_progreso=None):
     """
-    Descarga el .exe a una carpeta temporal y llama a `callback_listo`
-    con la ruta cuando termina, o `callback_error` si algo falla.
-    Corre en un hilo aparte — no bloquea el asistente.
+    Descarga el .exe a una carpeta temporal y devuelve la ruta local,
+    o None si algo falló.
+
+    `callback_progreso`, si se da, se llama con un texto corto en
+    cada etapa (ej. "Descargando actualización... 42%") — pensado
+    para conectarlo a actualizar_splash() durante el arranque, igual
+    que el mismo patrón ya usado en verificacion.py para instalar
+    Ollama.
     """
+
+    def _reportar(texto):
+        print(texto)
+        if callback_progreso:
+            try:
+                callback_progreso(texto)
+            except Exception:
+                pass
+
     try:
-        print(f"[Actualizador] Descargando actualización desde {url}...")
+        _reportar("Descargando actualización...")
         log.info(f"Descargando actualización: {url}")
 
         r = requests.get(url, stream=True, timeout=TIMEOUT_DL)
@@ -166,17 +205,16 @@ def _descargar_exe(url, callback_listo, callback_error):
                     descargado += len(chunk)
                     if total:
                         pct = descargado * 100 // total
-                        print(f"\r[Actualizador] Descargando... {pct}%", end="", flush=True)
+                        _reportar(f"Descargando actualización... {pct}%")
 
-        print()  # nueva línea después del progreso
         print(f"[Actualizador] Descarga completa: {ruta_exe}")
         log.info(f"Actualización descargada en {ruta_exe}")
-        callback_listo(ruta_exe)
+        return ruta_exe
 
     except Exception as e:
         print(f"[Actualizador] Error descargando la actualización: {e}")
         log.exception("Error descargando la actualización")
-        callback_error()
+        return None
 
 
 # =========================================================
@@ -185,24 +223,73 @@ def _descargar_exe(url, callback_listo, callback_error):
 
 def _instalar_y_cerrar(ruta_exe):
     """
-    Ejecuta el instalador descargado y cierra el asistente.
-    El instalador de Inno Setup corre de forma independiente, así
-    que el asistente puede cerrarse sin esperar a que termine.
+    Ejecuta el instalador descargado, en modo SILENCIOSO y
+    automático, y cierra el asistente. El instalador de Inno Setup
+    corre de forma independiente, así que el asistente puede
+    cerrarse sin esperar a que termine.
+
+    FIX/NUEVO: antes esto lanzaba el instalador SIN ningún flag, lo
+    que abría el wizard completo de Inno Setup (bienvenida, carpeta
+    de destino, tareas, página de "listo para instalar", página de
+    fin) — el usuario tenía que volver a pasar por TODO eso para lo
+    que se suponía era una actualización automática ya confirmada
+    antes (en el diálogo de preguntar_actualizar_gui). Ahora se usa:
+
+      /VERYSILENT          -> sin ninguna ventana del wizard
+      /SUPPRESSMSGBOXES     -> los MsgBox del script (ver
+                               instalador.iss, InitializeSetup)
+                               responden con su valor por defecto en
+                               vez de esperar un clic que nunca va a
+                               llegar
+      /NORESTART            -> nunca reiniciar Windows solo
+      /CLOSEAPPLICATIONS     -> cierra automáticamente cualquier app
+                               que tenga abiertos los archivos a
+                               reemplazar (ver AppMutex/
+                               CloseApplications en instalador.iss)
+      /RESTARTAPPLICATIONS  -> reabre el asistente solo al terminar
+                               (ver el segundo [Run] en
+                               instalador.iss, condicionado a
+                               WizardSilent)
+
+    FIX/NUEVO: además, justo antes de lanzar el instalador se libera
+    el mutex de instancia única (ver instancia.py) en vez de confiar
+    en que sys.exit(0) + el proceso muriendo del todo alcance a
+    tiempo. Antes era una carrera: si el proceso (con pygame,
+    faster-whisper, etc. cargados) tardaba más de lo esperado en
+    terminar de cerrarse, el instalador arrancaba y su chequeo
+    CheckForMutexes('AsistenteIA_Running') todavía encontraba el
+    mutex vivo, mostrando "el asistente parece estar corriendo,
+    ¿continuar de todas formas?" en medio de lo que debía ser 100%
+    automático. Liberando el mutex nosotros mismos, de forma
+    explícita, esto deja de depender de ningún timing.
     """
     try:
-        print(f"[Actualizador] Ejecutando instalador: {ruta_exe}")
-        log.info(f"Ejecutando instalador de actualización: {ruta_exe}")
+        print(f"[Actualizador] Ejecutando instalador (silencioso): {ruta_exe}")
+        log.info(f"Ejecutando instalador de actualización (silencioso): {ruta_exe}")
+
+        from instancia import liberar as _liberar_mutex
+        _liberar_mutex()
 
         subprocess.Popen(
-            [str(ruta_exe)],
+            [
+                str(ruta_exe),
+                "/VERYSILENT",
+                "/SUPPRESSMSGBOXES",
+                "/NORESTART",
+                "/CLOSEAPPLICATIONS",
+                "/RESTARTAPPLICATIONS",
+            ],
             creationflags=subprocess.CREATE_NO_WINDOW
             if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
         )
 
-        # pequeña pausa para que el instalador arranque antes de que
-        # el proceso del asistente se cierre
-        import time
-        time.sleep(1)
+        # margen para que el instalador arranque y tome el control
+        # antes de que el proceso del asistente se cierre — se
+        # aumenta de 1s a 2s como colchón extra (el mutex ya se
+        # liberó arriba, así que esto ya NO es lo único que evita el
+        # falso aviso de "instancia corriendo", solo un margen extra
+        # de cortesía)
+        time.sleep(2)
 
         sys.exit(0)
 
@@ -212,109 +299,136 @@ def _instalar_y_cerrar(ruta_exe):
 
 
 # =========================================================
-# FLUJO PRINCIPAL
+# 1. VERIFICACIÓN AUTOMÁTICA AL ARRANCAR (con GUI)
 # =========================================================
 
-# estado compartido entre el hilo de descarga y el loop principal
-_estado = {
-    "tag_nuevo":  None,   # tag de la versión disponible
-    "ruta_exe":   None,   # ruta local del .exe descargado (None si aún no llegó)
-    "error":      False,  # True si la descarga falló
-    "pendiente":  False,  # True si hay una actualización esperando confirmación
-}
-_lock_estado = threading.Lock()
-
-
-def _on_descarga_lista(ruta_exe):
-    with _lock_estado:
-        _estado["ruta_exe"]  = ruta_exe
-        _estado["pendiente"] = True
-
-
-def _on_descarga_error():
-    with _lock_estado:
-        _estado["error"] = True
-
-
-def _verificar_y_descargar():
+def verificar_actualizacion_arranque(callback_progreso=None):
     """
-    Corre en un hilo daemon al arrancar. Consulta GitHub, y si hay
-    versión nueva, arranca la descarga en background.
+    Llamar UNA vez durante el arranque, mientras el splash está
+    visible (ver main.py) — consulta GitHub, y si hay una versión
+    nueva, pregunta con una ventana (ver setup_actualizacion_gui.py)
+    si se quiere instalar ahora.
+
+    `callback_progreso`, si se da, se llama con textos cortos de
+    estado (pensado para conectarlo a actualizar_splash()).
+
+    Devuelve:
+      True  -> el arranque debe CONTINUAR normalmente (no había
+               actualización, falló la consulta/descarga, o el
+               usuario prefirió posponerla).
+      False -> el asistente se está cerrando para instalar la
+               actualización — quien llama debe detener el arranque
+               de inmediato (en la práctica, _instalar_y_cerrar() ya
+               hizo sys.exit(0) antes de llegar a retornar esto; se
+               deja como resguardo por si esa llamada no llegara a
+               cerrar el proceso por algún motivo).
     """
     tag_remoto, url_exe = _consultar_release()
 
     if not tag_remoto:
-        return  # sin internet o sin release válida
+        return True  # sin internet o sin release válida — seguir normal
 
     tag_local = obtener_version_local()
 
-    # primera vez sin versión registrada: solo guardar la versión
-    # actual sin ofrecer actualizar (el usuario ya tiene esta versión
-    # instalada, no tiene sentido ofrecerle descargar lo mismo)
     if not tag_local:
+        # primera ejecución sin versión registrada: solo guardar la
+        # versión actual, sin ofrecer "actualizar" a lo mismo que ya
+        # se tiene instalado
         print(f"[Actualizador] Primera ejecución — registrando versión: {tag_remoto}")
         guardar_version_local(tag_remoto)
-        return
+        return True
 
     if not _hay_version_nueva(tag_remoto, tag_local):
         print(f"[Actualizador] Ya tienes la última versión ({tag_local})")
-        return
+        return True
 
     print(f"[Actualizador] Nueva versión disponible: {tag_remoto} (instalada: {tag_local})")
     log.info(f"Nueva versión disponible: {tag_remoto} (actual: {tag_local})")
 
-    with _lock_estado:
-        _estado["tag_nuevo"] = tag_remoto
+    from setup_actualizacion_gui import preguntar_actualizar_gui
+    if not preguntar_actualizar_gui(tag_remoto):
+        print("[Actualizador] Usuario prefirió no actualizar ahora.")
+        return True
 
-    # descarga en hilo aparte para no bloquear nada
-    hilo = threading.Thread(
-        target=_descargar_exe,
-        args=(url_exe, _on_descarga_lista, _on_descarga_error),
-        daemon=True,
+    ruta_exe = _descargar_exe(url_exe, callback_progreso)
+
+    if not ruta_exe:
+        if callback_progreso:
+            callback_progreso("No se pudo descargar la actualización, continuando...")
+        return True  # la descarga falló — seguir arrancando normal
+
+    if callback_progreso:
+        callback_progreso("Instalando actualización...")
+
+    # FIX: antes esto nunca se llamaba en el camino real de
+    # actualización (solo en la rama de "primera ejecución" más
+    # arriba) — config.json seguía con la versión VIEJA después de
+    # instalar, así que el próximo arranque (ya con el .exe nuevo)
+    # comparaba contra esa versión vieja, detectaba "hay una versión
+    # nueva" otra vez, y volvía a ofrecer instalar lo que ya se
+    # acababa de instalar — un bucle sin fin. Se guarda ACÁ, antes de
+    # instalar (después de esto el proceso se cierra con
+    # sys.exit(0), así que es el último punto posible para hacerlo).
+    guardar_version_local(tag_remoto)
+
+    _instalar_y_cerrar(ruta_exe)
+    return False
+
+
+# =========================================================
+# 2. BÚSQUEDA MANUAL POR VOZ
+# =========================================================
+
+def _flujo_manual_en_hilo(tag_remoto, url_exe):
+    """
+    Corre en un hilo daemon — descarga, y cuando termina, habla
+    directamente para avisar y pedir confirmación. El asistente
+    sigue respondiendo normalmente a otros comandos mientras esto
+    descarga en background.
+    """
+    from tts import hablar
+    from voice import escuchar_confirmacion
+    from voz_utils import interpretar_confirmacion
+
+    ruta_exe = _descargar_exe(url_exe)
+
+    if not ruta_exe:
+        hablar("No pude descargar la actualización, intenta de nuevo más tarde")
+        return
+
+    respuesta = hablar(
+        f"Ya descargué la actualización {tag_remoto}. ¿La instalo ahora?",
+        permitir_interrupcion=True,
     )
-    hilo.start()
+    if respuesta is None:
+        respuesta = escuchar_confirmacion(timeout=8)
 
-
-def iniciar_verificacion():
-    """
-    Llamar UNA vez al arrancar el asistente (desde main.py).
-    Lanza la verificación en background — no bloquea el arranque.
-    """
-    threading.Thread(target=_verificar_y_descargar, daemon=True).start()
-
-
-def hay_actualizacion_pendiente():
-    """
-    Devuelve True si hay una actualización descargada y lista para
-    instalar. Llamar desde el loop principal de main.py para saber
-    cuándo avisar al usuario.
-    """
-    with _lock_estado:
-        return _estado["pendiente"]
-
-
-def obtener_tag_nuevo():
-    with _lock_estado:
-        return _estado["tag_nuevo"]
-
-
-def aplicar_actualizacion():
-    """
-    Ejecuta el instalador descargado. Llamar desde main.py después
-    de que el usuario confirmó por voz que quiere actualizar.
-    """
-    with _lock_estado:
-        ruta = _estado["ruta_exe"]
-
-    if ruta:
-        _instalar_y_cerrar(ruta)
+    if interpretar_confirmacion(respuesta, contexto="¿Instalo la actualización?") is True:
+        hablar("Instalando, el asistente se va a cerrar")
+        # FIX: mismo motivo que en verificar_actualizacion_arranque —
+        # sin esto, el próximo arranque (ya con la versión nueva
+        # instalada) seguía comparando contra la versión vieja
+        # guardada en config.json y volvía a ofrecer la misma
+        # actualización que se acaba de instalar.
+        guardar_version_local(tag_remoto)
+        _instalar_y_cerrar(ruta_exe)
+    else:
+        hablar("Entendido, la instalaré en otro momento")
 
 
 def buscar_actualizacion_ahora(valor=None):
     """
     Acción de tool para buscar actualizaciones por voz de forma
-    inmediata (sin esperar al background del arranque).
-    Devuelve (éxito, mensaje) — mismo patrón que el resto de tools.
+    inmediata (sin esperar a la próxima vez que se abra el
+    asistente). Devuelve (éxito, mensaje) — mismo patrón que el
+    resto de tools.
+
+    Descarga en background (el asistente sigue disponible para otros
+    comandos mientras tanto) y, cuando termina, el propio hilo avisa
+    por voz y pide confirmación — el usuario inició este pedido por
+    voz, así que responder por voz acá tiene sentido (a diferencia de
+    la verificación automática al arrancar, que ahora es visual —
+    ver verificar_actualizacion_arranque más arriba).
     """
     from tts import hablar as _hablar
 
@@ -328,22 +442,14 @@ def buscar_actualizacion_ahora(valor=None):
     tag_local = obtener_version_local()
 
     if not _hay_version_nueva(tag_remoto, tag_local):
-        return True, f"Ya tienes la última versión instalada"
-
-    # hay versión nueva — actualizar el estado y arrancar descarga
-    with _lock_estado:
-        _estado["tag_nuevo"]  = tag_remoto
-        _estado["pendiente"]  = False  # se reseteará cuando termine la descarga
-        _estado["ruta_exe"]   = None
-        _estado["error"]      = False
+        return True, "Ya tienes la última versión instalada"
 
     _hablar(f"Hay una versión nueva disponible: {tag_remoto}. Descargando en background, te aviso cuando esté lista.")
 
-    hilo = threading.Thread(
-        target=_descargar_exe,
-        args=(url_exe, _on_descarga_lista, _on_descarga_error),
+    threading.Thread(
+        target=_flujo_manual_en_hilo,
+        args=(tag_remoto, url_exe),
         daemon=True,
-    )
-    hilo.start()
+    ).start()
 
     return True, None  # el mensaje ya se habló directamente arriba

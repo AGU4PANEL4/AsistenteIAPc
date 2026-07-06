@@ -150,7 +150,7 @@ def cargar_cache():
         if cambiado:
             guardar_cache(data)
         return data
-    except:
+    except Exception:
         return {}
 
 
@@ -169,7 +169,7 @@ def cargar_index():
     try:
         with open(ARCHIVO_INDEX, "r", encoding="utf-8") as f:
             return json.load(f)
-    except:
+    except Exception:
         return {}
 
 
@@ -185,7 +185,7 @@ def cargar_games_index():
     try:
         with open(ARCHIVO_GAMES, "r", encoding="utf-8") as f:
             return json.load(f)
-    except:
+    except Exception:
         return {}
 
 
@@ -634,9 +634,9 @@ def indexar_apps():
                             "oculto": False
                         }
                         total += 1
-                    except:
+                    except Exception:
                         pass
-        except:
+        except Exception:
             pass
 
     guardar_index(apps_index)
@@ -931,7 +931,7 @@ def buscar_app(nombre, fn_confirmar_rebuscar=None, fn_cancelado=None):
             ):
                 print("Game Index:", clave)
                 return data, False, clave
-        except:
+        except Exception:
             pass
 
     # =====================================================
@@ -956,7 +956,7 @@ def buscar_app(nombre, fn_confirmar_rebuscar=None, fn_cancelado=None):
                         "procesos_cierre": [],
                         "tipo":            "normal"
                     }, False, clave
-        except:
+        except Exception:
             pass
 
     # =====================================================

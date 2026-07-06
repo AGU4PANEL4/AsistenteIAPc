@@ -174,7 +174,7 @@ def capturar_pids_por_nombre(
             nombre_base     = normalizar(Path(destino).stem)
             nombre_launcher = nombre_base
             print("DESTINO:", destino)
-        except:
+        except Exception:
             pass
 
     data_cache   = app_finder.cache.get(nombre_cache, {})
@@ -284,7 +284,7 @@ def capturar_pids_por_nombre(
             exe    = ""
             try:
                 exe = proc.exe()
-            except:
+            except Exception:
                 pass
             if es_contaminacion(name, exe):
                 return
@@ -493,7 +493,7 @@ def obtener_procesos(nombre):
             pname = normalizar((p.info["name"] or "").replace(".exe", ""))
             if nombre == pname or nombre in pname or pname in nombre:
                 encontrados.append(p)
-        except:
+        except Exception:
             pass
     return encontrados
 
@@ -518,7 +518,7 @@ def traer_al_frente(nombre):
             pname  = normalizar(proc.name().replace(".exe", ""))
             if nombre == pname or nombre in pname or pname in nombre:
                 ventanas.append(hwnd)
-        except:
+        except Exception:
             pass
 
     win32gui.EnumWindows(callback, None)
@@ -534,7 +534,7 @@ def traer_al_frente(nombre):
             win32gui.ShowWindow(hwnd, win32con.SW_SHOW)
         win32gui.SetForegroundWindow(hwnd)
         return True
-    except:
+    except Exception:
         return False
 
 # =========================================================
@@ -815,7 +815,7 @@ def abrir_app(nombre):
             carpeta_real = str(Path(destino).parent).lower()
         else:
             carpeta_real = str(Path(ruta_str).parent).lower()
-    except:
+    except Exception:
         carpeta_real = str(Path(ruta_str).parent).lower()
 
     if not desde_cache:
@@ -1016,7 +1016,7 @@ def _obtener_pids_app(nombre):
                 or pname in nombre_limpio
             ):
                 pids_app.add(proc.info["pid"])
-        except:
+        except Exception:
             pass
 
     # ---- 2. por cache (procesos_cierre + carpetas_detectadas) ----
@@ -1040,7 +1040,7 @@ def _obtener_pids_app(nombre):
                     exe  = (proc.info.get("exe") or "").lower()
                     if name in procesos or any(c in exe for c in carpetas):
                         pids_app.add(proc.info["pid"])
-                except:
+                except Exception:
                     pass
 
             # ---- 3. carpeta_raiz como fallback ----
@@ -1052,7 +1052,7 @@ def _obtener_pids_app(nombre):
                             exe = (proc.info.get("exe") or "").lower()
                             if carpeta_raiz in exe:
                                 pids_app.add(proc.info["pid"])
-                        except:
+                        except Exception:
                             pass
 
             break
@@ -1087,7 +1087,7 @@ def _buscar_ventanas_por_nombre(nombre, incluir_ocultas=False):
 
             if visible or (incluir_ocultas and titulo):
                 ventanas.append((hwnd, visible))
-        except:
+        except Exception:
             pass
 
     win32gui.EnumWindows(callback, None)
@@ -1108,7 +1108,7 @@ def minimizar_app(nombre):
     for hwnd in ventanas:
         try:
             win32gui.ShowWindow(hwnd, win32con.SW_MINIMIZE)
-        except:
+        except Exception:
             pass
 
     return True, nombre
@@ -1183,7 +1183,7 @@ def maximizar_app(nombre):
 
         try:
             user32.SetForegroundWindow(hwnd)
-        except:
+        except Exception:
             pass
 
         user32.SetFocus(hwnd)
@@ -1220,7 +1220,7 @@ def maximizar_app(nombre):
                     ],
                     creationflags=subprocess.CREATE_NO_WINDOW
                 )
-            except:
+            except Exception:
                 pass
 
         return True, nombre

@@ -21,7 +21,7 @@ def ollama_ejecutandose():
     try:
         requests.get("http://127.0.0.1:11434", timeout=2)
         return True
-    except:
+    except Exception:
         return False
 
 
@@ -39,7 +39,7 @@ def modelo_instalado():
             encoding="utf-8"
         )
         return MODELO_OLLAMA.lower() in salida.lower()
-    except:
+    except Exception:
         return False
 
 # =========================================================
@@ -47,10 +47,36 @@ def modelo_instalado():
 # FIX: progreso de descarga + timeout
 # =========================================================
 
-def instalar_ollama():
+def instalar_ollama(callback_progreso=None):
+    """
+    Descarga el instalador de Ollama, lo ejecuta, y espera a que el
+    usuario confirme que terminó de instalarlo.
+
+    `callback_progreso`, si se da, se llama con un texto corto en
+    cada etapa (ej. "Descargando Ollama... 42%") — pensado para
+    conectarlo a actualizar_splash() y que el progreso sea visible
+    en el .exe empaquetado, donde los print() de consola no se ven
+    en ningún lado.
+
+    FIX/NUEVO: antes esto terminaba con un input() de consola para
+    esperar la confirmación manual del usuario — se rompía en el
+    .exe empaquetado (console=False → sys.stdin es None → excepción
+    que tumbaba el arranque completo). Ahora se usa un diálogo de
+    Tkinter (ver setup_ollama_gui.py), mismo patrón ya usado para la
+    key de Groq, que además verifica de verdad que Ollama quedó
+    instalado antes de dejar continuar.
+    """
+
+    def _reportar(texto):
+        print(texto)
+        if callback_progreso:
+            try:
+                callback_progreso(texto)
+            except Exception:
+                pass
 
     try:
-        print("Descargando Ollama...")
+        _reportar("Descargando Ollama...")
 
         url              = "https://ollama.com/download/OllamaSetup.exe"
         ruta_instalador  = os.path.join(tempfile.gettempdir(), "OllamaSetup.exe")
@@ -66,17 +92,26 @@ def instalar_ollama():
                     f.write(chunk)
                     descargado += len(chunk)
 
-                    # FIX: mostrar progreso
                     if total:
                         pct = descargado * 100 // total
-                        print(f"\r  Descargando... {pct}%", end="", flush=True)
+                        # FIX: se reemplazó el print con \r (invisible
+                        # en el .exe empaquetado, sin consola) por
+                        # _reportar(), que además de imprimir en
+                        # consola (para quien corre desde terminal)
+                        # actualiza el splash si se le pasó el callback.
+                        _reportar(f"Descargando Ollama... {pct}%")
 
-        print("\nEjecutando instalador...")
-        print("Instala Ollama y luego presiona Enter para continuar...")
+        _reportar("Ejecutando instalador de Ollama...")
 
         subprocess.Popen([ruta_instalador])
 
-        input()  # esperar confirmación manual
+        _reportar("Esperando a que instales Ollama...")
+
+        from setup_ollama_gui import esperar_confirmacion_instalacion_gui
+        if not esperar_confirmacion_instalacion_gui():
+            print("[Ollama] Instalación cancelada por el usuario.")
+            log.warning("Usuario canceló la instalación de Ollama en el diálogo de confirmación")
+            return False
 
         return True
 
@@ -317,7 +352,12 @@ def precalentar_modelo_en_segundo_plano():
 # PREPARAR IA
 # =========================================================
 
-def preparar_ia():
+def preparar_ia(callback_progreso=None):
+    """
+    `callback_progreso`, si se da, se pasa a instalar_ollama() para
+    que el progreso de descarga/instalación sea visible en el splash
+    de arranque (ver main.py) en vez de solo en consola.
+    """
 
     # ==================================
     # OLLAMA INSTALADO
@@ -326,7 +366,7 @@ def preparar_ia():
     if not ollama_instalado():
         print("Ollama no está instalado.")
 
-        if not instalar_ollama():
+        if not instalar_ollama(callback_progreso):
             return False
 
         if not esperar_instalacion_ollama():
