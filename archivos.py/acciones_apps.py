@@ -39,7 +39,7 @@ from aliases import (
 )
 from cancelacion import iniciar_cancelacion, detener_cancelacion, fue_cancelado
 import app_finder
-from voz_utils import elegir_de_lista, interpretar_confirmacion
+from voz_utils import elegir_de_lista, interpretar_confirmacion, UMBRAL_SIMILITUD_DIFUSA
 from acciones_sistema import normalizar
 
 # =========================================================
@@ -180,6 +180,32 @@ def capturar_pids_por_nombre(
     data_cache   = app_finder.cache.get(nombre_cache, {})
     carpeta_raiz = data_cache.get("carpeta_raiz", "").lower()
     es_steam     = ruta_str.lower().endswith(".acf")
+    # NUEVO: mismo motivo que es_steam — un juego de Epic Games
+    # (ver app_finder._escanear_juegos_epic / el tipo "epic" en
+    # abrir_app) puede arrancar con un .exe de nombre completamente
+    # distinto al título del juego (ej. Fortnite arranca
+    # "FortniteClient-Win64-Shipping.exe", pero otros juegos de Epic
+    # pueden usar nombres internos sin ningún parecido al nombre que
+    # el usuario dijo) — sin este catch-all equivalente al de Steam,
+    # capturar_pids_por_nombre() podía no encontrar el proceso real
+    # y guardar una entrada de caché sin PIDs ni carpetas detectadas,
+    # dejando que un futuro "ciérralo" dependiera por completo del
+    # fallback de búsqueda directa entre procesos en ejecución (ver
+    # _procesos_en_ejecucion_que_coinciden en este mismo archivo) en
+    # vez de tener el dato ya guardado de antes.
+    #
+    # Se usa el campo "tipo" que abrir_app() ya guardó en la caché
+    # (ver TIPO EPIC ahí) en vez de adivinar por el texto de la ruta
+    # — es la señal más directa y confiable de que se trata de un
+    # juego de Epic. Para Epic, a diferencia de Steam (donde ruta_str
+    # es el .acf del manifest, no una carpeta), ruta_str YA ES la
+    # carpeta de instalación exacta que el propio Epic Games Launcher
+    # reportó para ESTE juego (ver InstallLocation en
+    # _escanear_juegos_epic) — más preciso que un substring genérico
+    # de marca, que fallaría si el usuario eligió una carpeta de
+    # instalación personalizada.
+    es_epic      = data_cache.get("tipo") == "epic"
+    carpeta_epic = ruta_str.lower() if es_epic else ""
 
     def es_proceso_ruido(name):
         n = name.lower()
@@ -251,6 +277,7 @@ def capturar_pids_por_nombre(
                 )
                 por_carpeta       = bool(carpeta_raiz) and carpeta_raiz in exe
                 por_steam         = es_steam and "steamapps\\common" in exe
+                por_epic          = bool(carpeta_epic) and carpeta_epic in exe
                 por_carpeta_nueva = (
                     bool(exe)
                     and "windows\\"               not in carpeta_exe
@@ -258,7 +285,7 @@ def capturar_pids_por_nombre(
                     and any(carpeta_exe.startswith(c[:25]) for c in carpetas)
                 )
 
-                if por_nombre or por_carpeta or por_steam or por_carpeta_nueva:
+                if por_nombre or por_carpeta or por_steam or por_epic or por_carpeta_nueva:
                     candidatos.append((pid, name, exe))
 
             except (psutil.NoSuchProcess, psutil.AccessDenied):
@@ -538,6 +565,206 @@ def traer_al_frente(nombre):
         return False
 
 # =========================================================
+# CERRAR APP — MATCH DIRECTO CONTRA PROCESOS EN EJECUCIÓN
+# FIX/NUEVO: cerrar_app() dependía SIEMPRE de que la app estuviera
+# en app_finder.cache (quedó ahí por haberse abierto antes con el
+# asistente) o de que app_finder.buscar_app() la encontrara
+# buscando en disco/registro — si ninguna de las dos cosas pasaba
+# (ej. el usuario abrió Chrome a mano con un acceso directo, nunca
+# le pidió al asistente que lo abriera, y Chrome tampoco quedó
+# indexado en el registro de la forma que buscar_app() espera), la
+# función directamente devolvía False sin siquiera revisar si había
+# un proceso con ese nombre corriendo ahora mismo — algo que
+# Windows sabe al instante, sin necesitar ningún índice propio.
+#
+# Esta función busca DIRECTO entre los procesos vivos en este
+# momento (psutil.process_iter), sin importar quién los abrió ni si
+# el asistente los conoce de antes. cerrar_app() la usa PRIMERO,
+# antes de tocar caché o disco — si encuentra algo y logra cerrarlo,
+# ya está, nunca hace falta la búsqueda lenta en disco. Si no
+# encuentra nada (ej. el nombre dicho es un alias que no se parece
+# en nada al nombre real del proceso, como "oso" -> "osu!(lazer)"),
+# se cae al flujo de siempre sin ningún cambio de comportamiento.
+# =========================================================
+
+def _limpiar_nombre_proceso(nombre_proceso):
+    """
+    Igual que app_finder.limpiar_nombre(), pero primero quita la
+    extensión .exe -- si no, "chrome.exe" se limpiaría a "chromeexe"
+    (el punto se borra como cualquier símbolo, no se vuelve espacio)
+    y nunca matchearía contra "chrome".
+    """
+    if nombre_proceso.lower().endswith(".exe"):
+        nombre_proceso = nombre_proceso[:-4]
+    return app_finder.limpiar_nombre(nombre_proceso)
+
+
+def _procesos_en_ejecucion_que_coinciden(nombre_limpio):
+    """
+    Devuelve una lista de (pid, nombre_proceso_original) de TODOS los
+    procesos actualmente corriendo cuyo nombre coincide con
+    `nombre_limpio` -- mismo criterio de coincidencia (exacto o
+    substring en cualquier dirección) ya usado en el resto del
+    proyecto para este tipo de matching aproximado (ver
+    buscar_en_cache en registrar_alias.py, por ejemplo), más un
+    respaldo de similitud difusa para variantes con errores menores
+    de transcripción.
+
+    Puede devolver varias coincidencias para una sola app (ej. Chrome
+    corre con varios procesos "chrome.exe" al mismo tiempo, uno por
+    pestaña/proceso hijo) -- cerrar_app() las cierra todas.
+
+    Nunca incluye el propio proceso del asistente, para que este
+    mecanismo no pueda terminar cerrándose a sí mismo por un
+    matching demasiado amplio.
+    """
+    if not nombre_limpio or len(nombre_limpio) < 2:
+        return []
+
+    propio_pid    = os.getpid()
+    coincidencias = []
+
+    for proc in psutil.process_iter(["pid", "name"]):
+        try:
+            if proc.info["pid"] == propio_pid:
+                continue
+
+            nombre_proc = proc.info["name"] or ""
+            if not nombre_proc:
+                continue
+
+            limpio = _limpiar_nombre_proceso(nombre_proc)
+            if not limpio:
+                continue
+
+            coincide_directo = (
+                nombre_limpio == limpio
+                or nombre_limpio in limpio
+                or limpio in nombre_limpio
+            )
+            coincide_difuso = (
+                not coincide_directo
+                and app_finder.parecido(nombre_limpio, limpio) >= UMBRAL_SIMILITUD_DIFUSA
+            )
+
+            if coincide_directo or coincide_difuso:
+                coincidencias.append((proc.info["pid"], nombre_proc))
+
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+
+    return coincidencias
+
+
+def _cerrar_ventanas_de_proceso(pid, timeout=4):
+    """
+    Manda WM_CLOSE a todas las ventanas visibles de nivel superior que
+    pertenezcan a `pid` -- el mismo cierre "amable" que un Alt+F4, que
+    le da a la app oportunidad de preguntar "¿guardar cambios?" antes
+    de cerrarse, en vez de matarla en seco de una.
+
+    FIX/NUEVO: antes, cerrar_app() iba DIRECTO a proc.terminate() (un
+    cierre forzado real en Windows, sin ningún aviso a la app) para
+    todo lo que cerraba -- si tenías un Word o Notepad con cambios
+    sin guardar y decías "cierra word", los perdías sin ningún aviso,
+    ni siquiera la oportunidad de decir que no. Ahora se intenta esto
+    PRIMERO; solo si la app no responde sola dentro de `timeout`
+    segundos (ver _terminar_pid) se recién se fuerza el cierre.
+
+    Devuelve True si el proceso terminó solo dentro de `timeout`
+    segundos. Si el proceso no tiene ninguna ventana visible (típico
+    de procesos de fondo/helpers sin UI, ej. steamwebhelper.exe), no
+    tiene sentido "cerrar amablemente" -- devuelve False de inmediato
+    para que _terminar_pid pase directo al cierre forzado, sin
+    esperar nada de más.
+    """
+    hwnds = []
+
+    def _enum_callback(hwnd, _):
+        if win32gui.IsWindowVisible(hwnd):
+            try:
+                _, pid_ventana = win32process.GetWindowThreadProcessId(hwnd)
+                if pid_ventana == pid:
+                    hwnds.append(hwnd)
+            except Exception:
+                pass
+        return True
+
+    try:
+        win32gui.EnumWindows(_enum_callback, None)
+    except Exception:
+        return False
+
+    if not hwnds:
+        return False
+
+    for hwnd in hwnds:
+        try:
+            win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
+        except Exception:
+            pass
+
+    inicio = time.time()
+    while time.time() - inicio < timeout:
+        if not psutil.pid_exists(pid):
+            return True
+        time.sleep(0.2)
+
+    return False
+
+
+def _terminar_pid(pid):
+    """
+    Intenta cerrar un proceso por PID, con esta cadena de respaldo:
+
+      1. Cierre AMABLE (WM_CLOSE a sus ventanas, ver
+         _cerrar_ventanas_de_proceso) -- le da a la app oportunidad
+         de guardar cambios pendientes antes de cerrarse. Solo aplica
+         si tiene ventanas visibles; los procesos sin UI pasan de
+         largo a este paso sin ninguna espera de más.
+      2. terminate() normal (señal de cierre estándar de Windows).
+      3. kill() si no respondió a tiempo.
+      4. taskkill si hay permisos insuficientes.
+      5. PowerShell elevado como último recurso.
+
+    Devuelve True si el proceso quedó cerrado (o ya no existía),
+    False si ningún método funcionó.
+    """
+    if _cerrar_ventanas_de_proceso(pid):
+        return True
+
+    try:
+        proc = psutil.Process(pid)
+        proc.terminate()
+        try:
+            proc.wait(timeout=3)
+        except psutil.TimeoutExpired:
+            proc.kill()
+        return True
+    except psutil.NoSuchProcess:
+        return True  # ya no existe, considerar éxito
+    except (psutil.AccessDenied, Exception):
+        try:
+            resultado_tk = subprocess.run(
+                ["taskkill", "/F", "/PID", str(pid)],
+                capture_output=True,
+            )
+            if resultado_tk.returncode == 0:
+                return True
+        except Exception:
+            pass
+
+        try:
+            subprocess.run(
+                ["powershell", "-Command", f"Stop-Process -Id {pid} -Force"],
+                capture_output=True,
+            )
+            return True
+        except Exception:
+            return False
+
+
+# =========================================================
 # CERRAR APP
 # =========================================================
 
@@ -552,6 +779,45 @@ def cerrar_app(nombre):
 
     from app_finder import limpiar_nombre as _limpiar
     nombre_limpio_cache = _limpiar(nombre)
+
+    # =====================================================
+    # NUEVO: intentar cerrar DIRECTO por lo que esté corriendo ahora
+    # mismo, ANTES de tocar caché o disco — cubre el caso de apps
+    # que el usuario abrió por su cuenta (no vía el asistente) y que
+    # tampoco quedaron indexadas por una búsqueda anterior. Si esto
+    # encuentra y cierra algo, listo — nunca hace falta la búsqueda
+    # lenta en disco de más abajo. Ver el comentario detallado en
+    # _procesos_en_ejecucion_que_coinciden() más arriba.
+    # =====================================================
+
+    coincidencias_directas = _procesos_en_ejecucion_que_coinciden(nombre_limpio_cache)
+
+    if coincidencias_directas:
+        print(f"[CERRAR DIRECTO] {nombre_original} -> {coincidencias_directas}")
+
+        cerrado_directo = False
+        for pid, nombre_proceso in coincidencias_directas:
+            if _terminar_pid(pid):
+                cerrado_directo = True
+                print(f"[CERRAR DIRECTO OK] {nombre_proceso} (pid {pid})")
+
+        if cerrado_directo:
+            # se guarda el alias con el nombre de proceso real (sin
+            # .exe) como referencia — no es tan preciso como el
+            # nombre_cache que arma buscar_app() (no sabemos la
+            # carpeta de instalación ni los demás procesos
+            # relacionados), pero acelera la PRÓXIMA vez que se pida
+            # abrir/cerrar esta misma app por el mismo nombre hablado
+            nombre_referencia = coincidencias_directas[0][1]
+            if nombre_referencia.lower().endswith(".exe"):
+                nombre_referencia = nombre_referencia[:-4]
+            guardar_alias_silencioso(nombre_original, nombre_referencia)
+
+            return True, nombre_original
+
+        # se encontró un proceso con ese nombre pero no se pudo
+        # cerrar ninguno (raro — ej. permisos) -> caer al flujo de
+        # siempre por si acaso, en vez de rendirse acá directamente
 
     # FIX: capturar_pids_por_nombre() corre en un hilo daemon en
     # background después de abrir_app() y puede estar agregando o
@@ -639,27 +905,9 @@ def cerrar_app(nombre):
     # primero intentar por PIDs guardados (más preciso que por nombre)
     if pids_guardados:
         for pid in list(pids_guardados):
-            try:
-                proc = psutil.Process(pid)
-                proc.terminate()
-                try:
-                    proc.wait(timeout=3)
-                except psutil.TimeoutExpired:
-                    proc.kill()
+            if _terminar_pid(pid):
                 cerrados = True
                 print(f"[CERRAR PID] {pid}")
-            except psutil.NoSuchProcess:
-                cerrados = True  # ya no existe, considerar éxito
-            except (psutil.AccessDenied, Exception) as e:
-                try:
-                    subprocess.run(
-                        ["taskkill", "/F", "/PID", str(pid)],
-                        capture_output=True
-                    )
-                    cerrados = True
-                    print(f"[CERRAR PID TASKKILL] {pid}")
-                except Exception:
-                    pass
 
     for proc in psutil.process_iter(["pid", "name", "exe"]):
         try:
@@ -674,46 +922,11 @@ def cerrar_app(nombre):
 
             print(f"[CERRAR] {proc.info['pid']} {name}")
 
-            try:
-                proc.terminate()
-                proc.wait(timeout=5)
+            if _terminar_pid(proc.info["pid"]):
                 cerrados = True
                 print(f"[CERRAR OK] {name}")
-            except psutil.TimeoutExpired:
-                try:
-                    proc.kill()
-                except psutil.NoSuchProcess:
-                    pass
-                cerrados = True
-                print(f"[CERRAR KILL] {name}")
-            except psutil.NoSuchProcess:
-                cerrados = True
-                print(f"[CERRAR YA MUERTO] {name}")
-            except (psutil.AccessDenied, Exception) as e:
-                # FIX: proceso con permisos elevados
-                # taskkill normal primero
-                try:
-                    resultado_tk = subprocess.run(
-                        ["taskkill", "/F", "/PID", str(proc.info["pid"])],
-                        capture_output=True,
-                        text=True
-                    )
-                    if resultado_tk.returncode == 0:
-                        cerrados = True
-                        print(f"[CERRAR TASKKILL] {name}")
-                    else:
-                        # taskkill elevado via PowerShell
-                        subprocess.run(
-                            [
-                                "powershell", "-Command",
-                                f"Stop-Process -Id {proc.info['pid']} -Force"
-                            ],
-                            capture_output=True
-                        )
-                        cerrados = True
-                        print(f"[CERRAR POWERSHELL] {name}")
-                except Exception as e2:
-                    print(f"[CERRAR ERROR] {name}: {e2}")
+            else:
+                print(f"[CERRAR ERROR] {name}")
 
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
@@ -798,6 +1011,55 @@ def abrir_app(nombre):
                 target=capturar_pids_por_nombre,
                 args=(nombre_cache, ruta_str, snapshot),
                 kwargs={"espera": 15, "timeout_captura": 60},
+                daemon=True
+            ).start()
+
+            return True, nombre_cache
+
+    # =====================================
+    # TIPO EPIC
+    # NUEVO: mismo patrón que TIPO STEAM de arriba — juegos de Epic
+    # Games Store (Fortnite, etc, ver _escanear_juegos_epic en
+    # app_finder.py) se lanzan por el protocolo propio de Epic en vez
+    # de ejecutar el .exe del juego directamente. Varios juegos de
+    # Epic (Fortnite incluido) usan Easy Anti-Cheat u otras
+    # protecciones que EXIGEN iniciarse a través del launcher —
+    # ejecutar el .exe directo lo abre un instante y lo cierra con un
+    # error de anti-cheat en vez de jugarlo de verdad, que era
+    # justamente el problema reportado.
+    # =====================================
+
+    if tipo == "epic":
+
+        if not desde_cache:
+            app_finder.cache[nombre_cache] = {
+                "ruta":                ruta_str,
+                "app_name":            resultado.get("app_name"),
+                "exe_name":            resultado.get("exe_name"),
+                "tipo":                "epic",
+                "procesos_cierre":     [],
+                "pids":                [],
+                "carpetas_detectadas": []
+            }
+            app_finder.guardar_cache()
+
+        app_name = resultado.get("app_name")
+
+        if app_name:
+            snapshot = obtener_snapshot()
+            os.startfile(f"com.epicgames.launcher://apps/{app_name}?action=launch&silent=true")
+
+            threading.Thread(
+                target=capturar_pids_por_nombre,
+                args=(nombre_cache, ruta_str, snapshot),
+                # NUEVO: espera más larga que Steam (15s/60s) — Epic
+                # Games Launcher, si no estaba ya abierto, tarda más
+                # en arrancar y autenticar antes de lanzar el juego
+                # de verdad; capturar_pids_por_nombre reintenta en un
+                # rango, así que solo hace falta darle más margen
+                # total para no dejar de capturar el PID real por
+                # cortar la búsqueda demasiado pronto.
+                kwargs={"espera": 25, "timeout_captura": 90},
                 daemon=True
             ).start()
 

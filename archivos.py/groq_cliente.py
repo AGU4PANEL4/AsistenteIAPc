@@ -209,9 +209,17 @@ def transcribir_groq(audio_wav_bytes, timeout=8, idioma="es", prompt_contexto=No
         return None
 
     # umbral de no_speech_prob por encima del cual se descarta el
-    # segmento — 0.6 es conservador (no descarta habla real con
-    # ruido de fondo normal) pero filtra los casos claros de
-    # silencio/ruido que generaban texto fantasma
+    # segmento — filtra los casos claros de silencio/ruido que
+    # generaban texto fantasma, sin descartar habla real dicha en voz
+    # baja o con ruido de fondo normal (que sigue devolviendo
+    # no_speech_prob bajo, cerca de 0).
+    #
+    # FIX/REVERTIDO: se había bajado a 0.5 (ver el mismo revert en
+    # voice.py) pero causó pérdida de audio real ocasional — "a veces
+    # no detecta nada". Vuelve a 0.6; la defensa contra resultados
+    # sin sentido ahora corre después, sobre el texto ya transcrito
+    # completo (ver _parece_gibberish en voice.py), un lugar más
+    # seguro para filtrar.
     UMBRAL_NO_SPEECH = 0.6
 
     def _tarea():

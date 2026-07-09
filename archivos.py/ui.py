@@ -82,6 +82,12 @@ class AsistenteUI:
         "procesando": {"txt": "Procesando...",           "color": C["amarillo"],  "dot": C["amarillo"]},
         "hablando":   {"txt": "Hablando...",             "color": C["verde"],     "dot": C["verde"]},
         "buscando":   {"txt": "Buscando app...",         "color": C["amarillo"],  "dot": C["amarillo"]},
+        # NUEVO: modo dormido (ver es_dormir en session.py / main.py) —
+        # mismos tonos apagados que "inactivo" (texto_dim/borde2), a
+        # propósito: visualmente debe sentirse tan "en reposo" como
+        # inactivo, solo que el texto aclara que hace falta la palabra
+        # de despertar en vez de la wake word normal.
+        "dormido":    {"txt": 'Durmiendo — di "despierta"', "color": C["texto_dim"], "dot": C["borde2"]},
     }
 
     def __init__(self, root):
@@ -167,7 +173,7 @@ class AsistenteUI:
         self.orb_canvas.bind("<B1-Motion>",     self._drag_motion)
         self.orb_canvas.bind("<ButtonRelease-1>", self._release_orbe)
 
-    def _dibujar_orbe(self, modo):
+    def _dibujar_orbe(self, modo, no_molestar_activo=False):
         cv    = self.orb_canvas
         color = self.ESTADOS.get(modo, self.ESTADOS["inactivo"])["dot"]
 
@@ -206,10 +212,71 @@ class AsistenteUI:
                     outline=tono, width=2, tags="anim",
                 )
 
+        elif modo == "dormido":
+            # NUEVO: animación propia para el modo dormido — antes
+            # cualquier estado sin animación específica (inactivo,
+            # dormido, cualquier otro) caía en el mismo puntito
+            # estático de "else" de más abajo, así que dormido se
+            # veía IGUAL que inactivo — nada en el orbe avisaba que
+            # el asistente no iba a reaccionar a la wake word normal.
+            #
+            # Acá se usa una fase mucho más lenta que self._orb_fase
+            # (×0.12) a propósito — una "respiración" pausada en vez
+            # del ritmo normal de las otras animaciones, para que se
+            # sienta como algo que duerme, no como que está ocupado.
+            # La forma es una luna creciente simple: un círculo con
+            # otro círculo del color de fondo superpuesto encima,
+            # desplazado — la misma técnica que ya usa self.orb_circulo
+            # (pintar con C["bg2"] para "recortar" contra la base).
+            fase_lenta  = self._orb_fase * 0.12
+            respiracion = (math.sin(fase_lenta) + 1) / 2  # 0..1 suave
+            radio_luna  = 9 + 2 * respiracion
+            tono        = _mezclar_hex(color, C["bg2"], 0.45 + 0.55 * respiracion)
+
+            cx, cy = ORBE_CENTRO, ORBE_CENTRO
+            cv.create_oval(
+                cx - radio_luna, cy - radio_luna,
+                cx + radio_luna, cy + radio_luna,
+                fill=tono, outline="", tags="anim",
+            )
+            desplazo = radio_luna * 0.55
+            cv.create_oval(
+                cx - radio_luna + desplazo, cy - radio_luna,
+                cx + radio_luna + desplazo, cy + radio_luna,
+                fill=C["bg2"], outline="", tags="anim",
+            )
+
         else:  # inactivo
             cv.create_oval(ORBE_CENTRO - 4, ORBE_CENTRO - 4,
                            ORBE_CENTRO + 4, ORBE_CENTRO + 4,
                            fill=C["borde2"], outline="", tags="anim")
+
+        # =====================================================
+        # INDICADOR DE NO MOLESTAR
+        # NUEVO: a diferencia de los estados de arriba (mutuamente
+        # excluyentes — el asistente está en UNO solo a la vez), no
+        # molestar puede estar activo AL MISMO TIEMPO que cualquier
+        # otro modo (ej. escuchando un comando con no molestar de
+        # fondo) — por eso se dibuja acá, DESPUÉS y ENCIMA de
+        # cualquier animación de arriba, en vez de ser un "modo" más.
+        # Un círculo con una línea diagonal (símbolo universal de
+        # "silenciado"), quieto — a propósito sin animación, para no
+        # competir visualmente con la animación del modo actual, y
+        # en rojo (C["rojo"]) para que se note incluso a simple
+        # vistazo, en una esquina del orbe.
+        # =====================================================
+
+        if no_molestar_activo:
+            bx, by, br = ORBE_CENTRO + ORBE_RADIO - 6, ORBE_CENTRO - ORBE_RADIO + 6, 7
+            cv.create_oval(
+                bx - br, by - br, bx + br, by + br,
+                fill=C["bg"], outline=C["rojo"], width=2, tags="anim",
+            )
+            d = br * 0.7
+            cv.create_line(
+                bx - d, by - d, bx + d, by + d,
+                fill=C["rojo"], width=2, tags="anim",
+            )
 
     # ── panel expandido ───────────────────────────────────
 
@@ -758,14 +825,17 @@ class AsistenteUI:
     def _tick_orbe(self):
         try:
             from ui_estado import get_estado
-            modo = get_estado().get("modo", "inactivo")
+            estado       = get_estado()
+            modo         = estado.get("modo", "inactivo")
+            no_molestar  = estado.get("no_molestar", False)
         except Exception:
-            modo = "inactivo"
+            modo        = "inactivo"
+            no_molestar = False
 
         self._orb_fase = (self._orb_fase + 0.18) % (2 * math.pi)
 
         if not self.expandido:
-            self._dibujar_orbe(modo)
+            self._dibujar_orbe(modo, no_molestar)
 
 
 # =========================================================

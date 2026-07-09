@@ -1,0 +1,192 @@
+# -*- mode: python ; coding: utf-8 -*-
+#
+# Spec de PyInstaller para AsistenteIA.
+#
+# Uso (desde la carpeta del proyecto, con el venv activado):
+#     pyinstaller asistente.spec --noconfirm
+#
+# El resultado queda en dist/AsistenteIA/AsistenteIA.exe (modo carpeta,
+# no "un solo archivo" — onefile arranca más lento porque descomprime
+# todo en una carpeta temporal cada vez que abres el programa, y con
+# tantas dependencias pesadas como pygame/pyaudio/win32 conviene más
+# la carpeta normal).
+
+import speech_recognition as sr
+from pathlib import Path
+from PyInstaller.utils.hooks import collect_dynamic_libs, collect_data_files
+
+# speech_recognition trae internamente el archivo de credenciales por
+# defecto para la API de reconocimiento de Google (pocketsphinx-data,
+# flac.exe, etc.). Si no se copian, recognize_google() falla en el
+# .exe aunque funcione perfecto al correr el .py directo.
+RUTA_SR = Path(sr.__file__).resolve().parent
+
+# faster-whisper corre sobre ctranslate2, que trae DLLs nativas
+# (libctranslate2.dll, OpenMP, etc.) que PyInstaller no detecta solo
+# por análisis de imports — hay que recolectarlas explícitamente, o
+# el .exe truena con un error de DLL faltante apenas intenta cargar
+# el modelo de Whisper.
+binarios_ctranslate2 = collect_dynamic_libs("ctranslate2")
+
+# tokenizers (dependencia de faster-whisper) a veces trae archivos
+# de datos propios (vocabularios, etc.) que también hay que copiar.
+datos_tokenizers = collect_data_files("tokenizers")
+
+# faster_whisper trae su propio modelo VAD (detección de voz, Silero)
+# como archivo de datos interno en faster_whisper/assets/*.onnx — se
+# usa porque voice.py llama a transcribe(..., vad_filter=True). Sin
+# esto, PyInstaller no lo copia (no es código Python, es un .onnx) y
+# la transcripción falla con NO_SUCHFILE buscando silero_vad_v6.onnx.
+datos_faster_whisper = collect_data_files("faster_whisper")
+
+datas = [
+    (str(RUTA_SR), "speech_recognition"),
+] + datos_tokenizers + datos_faster_whisper
+
+hiddenimports = [
+    # winsdk usa imports dinámicos por namespace que PyInstaller no
+    # detecta solo analizando el código — hay que declararlos a mano.
+    "winsdk",
+    "winsdk.windows.media.control",
+    "winsdk.windows.foundation",
+    "winsdk.windows.foundation.collections",
+
+    # pycaw / comtypes generan código dinámicamente en tiempo de
+    # ejecución (interfaces COM) — sin esto, el control de volumen
+    # por app falla en el .exe.
+    "comtypes.stream",
+    "pycaw.pycaw",
+
+    # win32com a veces hace falta explícito aunque no se importe
+    # directo en el código, porque pywin32 lo usa internamente.
+    "win32com",
+    "win32timezone",
+
+    # edge_tts / aiohttp usan resolución dinámica de protocolos
+    "aiohttp",
+
+    # pyttsx3 es el respaldo de voz local (SAPI5) si Edge TTS
+    # falla — usa win32com.client por debajo, que con imports
+    # dinámicos PyInstaller no siempre detecta solo.
+    "pyttsx3",
+    "pyttsx3.drivers",
+    "pyttsx3.drivers.sapi5",
+
+    # faster-whisper / ctranslate2 — el binding de Python carga
+    # el motor nativo de forma indirecta.
+    "faster_whisper",
+    "ctranslate2",
+
+    # tkinter — interfaz flotante (ui.py). Aunque tkinter es parte
+    # de la librería estándar, en algunos entornos PyInstaller no
+    # lo detecta automáticamente si no hay un import directo en el
+    # entry point. Se declara explícitamente como capa de seguridad.
+    "tkinter",
+    "tkinter.ttk",
+    "tkinter.messagebox",
+    "tkinter.simpledialog",
+
+    # pystray / Pillow — ícono en la bandeja del sistema (bandeja.py).
+    # pystray elige el backend según el sistema operativo con
+    # imports dinámicos que PyInstaller no detecta solo — hay que
+    # declarar explícitamente el backend de Windows.
+    "pystray",
+    "pystray._win32",
+    "PIL",
+    "PIL.Image",
+    "PIL.ImageDraw",
+]
+
+block_cipher = None
+
+# Módulos a excluir explícitamente — faster-whisper los arrastra
+# como dependencias transitivas opcionales, pero con ctranslate2
+# en CPU no los necesita para nada. Incluirlos infla la carpeta
+# _internal de 400MB a ~4GB y multiplica el tiempo de arranque.
+#
+# NOTA IMPORTANTE: si este exclude no estaba siendo respetado y la
+# carpeta _internal pesaba ~4GB de todas formas, la causa real (ya
+# diagnosticada) era tener "openai-whisper" instalado en el entorno
+# de empaquetado — un paquete DISTINTO de faster-whisper, que sí
+# depende de PyTorch completo con soporte CUDA. PyInstaller detecta
+# esa dependencia REAL y activa, y eso puede pesar más que el
+# exclude declarado acá. La solución real es no tener openai-whisper
+# instalado en el entorno donde se empaqueta (ver requirements.txt):
+#   pip uninstall openai-whisper torch torchvision torchaudio -y
+# Este EXCLUIR se deja como segunda capa de seguridad, no como la
+# solución principal.
+EXCLUIR = [
+    "whisper",
+    "torch",
+    "torchvision",
+    "torchaudio",
+    "torch.utils.tensorboard",
+    "tensorboard",
+    "numba",
+    "llvmlite",
+    "IPython",
+    "ipykernel",
+    "jupyter",
+    "matplotlib",
+    "scipy",
+    "sklearn",
+    "sklearn.utils",
+    "pandas",
+    "onnx",
+]
+
+a = Analysis(
+    ["main.py"],
+    pathex=[],
+    binaries=binarios_ctranslate2,
+    datas=datas,
+    hiddenimports=hiddenimports,
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[],
+    excludes=EXCLUIR,
+    win_no_prefer_redirects=False,
+    win_private_assemblies=False,
+    cipher=block_cipher,
+    noarchive=False,
+)
+
+pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    [],
+    exclude_binaries=True,
+    name="AsistenteIA",
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=True,
+    # console=False — el .exe no muestra ventana de consola al usuario
+    # final. Cuando desarrollás desde VS Code / terminal usás
+    # `python main.py` directamente, así que la consola siempre está
+    # visible ahí sin importar este flag (este flag solo afecta al
+    # .exe empaquetado). Los logs siguen escribiéndose al archivo
+    # %LOCALAPPDATA%\AsistenteIA\asistente.log como siempre.
+    # Si necesitás ver la consola del .exe para diagnosticar algo,
+    # temporalmente cambiá a console=True y reempaquetá.
+    console=False,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+    icon=None,  # cámbialo a "ruta\a\icono.ico" si tienes uno
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    name="AsistenteIA",
+)

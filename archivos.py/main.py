@@ -3,7 +3,8 @@ import time
 import atexit
 import ctypes
 from logger import log
-from session import sesion, es_cancelacion, es_despedida
+from session import sesion, es_cancelacion, es_despedida, es_repetir, es_dormir, DESPIERTA_WORD
+import no_molestar
 
 # =====================================================
 # MANEJO DE CRASHES EN EL .EXE (sin consola)
@@ -54,20 +55,20 @@ if getattr(sys, "frozen", False):
 # 2. Evitar que el usuario abra dos instancias del asistente
 #    al mismo tiempo (dos instancias peleando por el micrófono
 #    causaría comportamiento impredecible).
-#
-# FIX/NUEVO: la creación/liberación del mutex se movió a su propio
-# módulo (instancia.py) — actualizador.py necesita poder LIBERARLO
-# manualmente justo antes de lanzar el instalador de una
-# actualización (ver el comentario detallado en instancia.py y en
-# actualizador.py._instalar_y_cerrar), y este archivo no puede
-# importar algo de main.py sin crear un import circular.
+# El mutex se libera automáticamente cuando el proceso termina.
 # =====================================================
 
-import instancia
+_MUTEX_NOMBRE = "AsistenteIA_Running"
+_mutex_handle = None
 
-if not instancia.crear():
-    print("[Main] Ya hay una instancia del asistente corriendo. Cerrando.")
-    sys.exit(1)
+try:
+    _mutex_handle = ctypes.windll.kernel32.CreateMutexW(None, False, _MUTEX_NOMBRE)
+    if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+        print(f"[Main] Ya hay una instancia del asistente corriendo. Cerrando.")
+        ctypes.windll.kernel32.CloseHandle(_mutex_handle)
+        sys.exit(1)
+except Exception as e:
+    print(f"[Main] No se pudo crear el mutex de instancia única: {e}")
 
 # =====================================================
 # VENTANA DE CARGA (splash)
@@ -87,7 +88,7 @@ actualizar_splash("Cargando módulos...")
 
 try:
     from voice import escuchar, escuchar_wake_word, recalibrar
-    from tts import hablar
+    from tts import hablar, ultimo_mensaje
     from wakeword import detectar_wakeword
     from intents import detectar_intent
     from ia import interpretar_con_ia, responder_charla
@@ -348,7 +349,7 @@ asegurar_archivos()
 print("[Sistema] Iniciando asistente...")
 
 threading.Thread(target=indexar_apps,         daemon=True).start()
-threading.Thread(target=indexar_juegos_steam, daemon=True).start()
+threading.Thread(target=indexar_juegos,          daemon=True).start()
 
 try:
     limpiar_cache_duplicados()
@@ -411,6 +412,12 @@ while True:
             comando_pendiente = None
         elif sesion["activa"]:
             comando = escuchar()
+        elif sesion["dormido"]:
+            # NUEVO: en modo dormido, se escucha con el mismo mecanismo
+            # de la wake word pero sesgado hacia la palabra de
+            # despertar en vez de la wake word normal — ver el manejo
+            # completo más abajo, en la sección WAKE WORD.
+            comando = escuchar_wake_word(DESPIERTA_WORD)
         else:
             comando = escuchar_wake_word(WAKE_WORD)
 
@@ -507,6 +514,41 @@ while True:
         # =====================================================
 
         if not sesion["activa"]:
+            # NUEVO: mientras está dormido, se ignora la wake word
+            # normal por completo — lo único que se revisa es si esto
+            # fue la palabra de despertar. Cualquier otra cosa dicha
+            # mientras está "dormido" se descarta sin más (ni se
+            # activa sesión, ni se procesa como comando, ni cambia el
+            # estado visual a "escuchando" — se revisa ANTES de eso a
+            # propósito, para que la UI se mantenga en "Durmiendo..."
+            # de forma estable en vez de parpadear).
+            if sesion["dormido"]:
+                if detectar_wakeword(comando, DESPIERTA_WORD):
+                    sesion["dormido"] = False
+                    set_modo("escuchando")
+                    hablar("Ya estoy de vuelta")
+                    # NUEVO: esto reproduce cualquier recordatorio/
+                    # temporizador que haya sonado MIENTRAS estaba
+                    # dormido (quedaron diferidos por no_molestar en
+                    # vez de interrumpir el silencio) — si no quedó
+                    # nada pendiente, no dice nada de más.
+                    #
+                    # FIX: solo se desactiva no_molestar acá si fue
+                    # "duérmete" quien lo activó (ver
+                    # sesion["dormido_activo_no_molestar"], escrito en
+                    # el bloque de es_dormir() más abajo). Si ya
+                    # estaba activo DE ANTES por su cuenta (el usuario
+                    # lo había puesto manualmente, con su propia
+                    # duración), no se toca — antes esto lo cortaba
+                    # siempre, aunque el usuario hubiera pedido
+                    # explícitamente, por ejemplo, "no molestar por 2
+                    # horas" y todavía le quedara la mayor parte de
+                    # ese tiempo.
+                    if sesion["dormido_activo_no_molestar"]:
+                        no_molestar.desactivar()
+                        sesion["dormido_activo_no_molestar"] = False
+                continue
+
             set_modo("escuchando")
             if not detectar_wakeword(comando, WAKE_WORD):
                 continue
@@ -545,6 +587,76 @@ while True:
             sesion["activa"]          = False
             esperando_respuesta_aviso = False
             set_modo("inactivo")
+            continue
+
+        # =====================================================
+        # MODO DORMIDO
+        # NUEVO: ver es_dormir() en session.py — suspende la reacción
+        # a la wake word normal hasta que se diga la palabra de
+        # despertar. Termina la sesión igual que una despedida, pero
+        # deja marcado sesion["dormido"] para que la sección WAKE WORD
+        # de más arriba ignore la wake word normal hasta despertar.
+        #
+        # FIX/NUEVO: al principio, dormido solo afectaba la wake
+        # word — un recordatorio o temporizador programado para
+        # sonar mientras el usuario estaba "dormido" lo interrumpía
+        # igual, hablando en voz alta, aunque el usuario hubiera
+        # pedido explícitamente silencio. Ahora dormir TAMBIÉN activa
+        # no_molestar (ver no_molestar.py) — recordatorios.py y
+        # temporizadores.py ya consultan no_molestar.modo_activo()
+        # antes de hablar sus avisos, así que esto los difiere en vez
+        # de interrumpir, y se reproducen solos al despertar (ver el
+        # bloque de "despierta" más arriba).
+        #
+        # Se usa una duración larga (12 horas) en vez de "indefinida"
+        # porque no_molestar.activar() está pensado para una duración
+        # concreta — 12 horas alcanza de sobra para cualquier siesta
+        # real, y desactivar() al despertar corta el modo de
+        # inmediato de todas formas, sin esperar a que se cumplan las
+        # 12 horas.
+        #
+        # FIX: antes esto llamaba a no_molestar.activar(60*12) SIEMPRE,
+        # sin importar si ya estaba activo por su cuenta — si el
+        # usuario había puesto "no molestar por 2 horas" y DESPUÉS
+        # decía "duérmete", esto pisaba esas 2 horas con 12, y al
+        # despertar (ver el bloque de "despierta" más arriba) se
+        # cortaba TODO de inmediato — el usuario perdía por completo
+        # la duración que había elegido a propósito. Ahora solo se
+        # activa (y se marca como "nuestro" para desactivarlo después)
+        # si no_molestar NO estaba ya activo — si ya lo estaba, se
+        # respeta tal cual, sin tocar su duración ni desactivarlo
+        # antes de tiempo al despertar.
+        # =====================================================
+
+        if es_dormir(comando):
+            hablar(f"Me quedo en silencio. Decí \"{DESPIERTA_WORD}\" cuando me necesites")
+            sesion["activa"]          = False
+            sesion["dormido"]         = True
+
+            ya_estaba_activo = no_molestar.modo_activo()
+            sesion["dormido_activo_no_molestar"] = not ya_estaba_activo
+            if not ya_estaba_activo:
+                no_molestar.activar(60 * 12)
+
+            esperando_respuesta_aviso = False
+            set_modo("dormido")
+            continue
+
+        # =====================================================
+        # REPETIR ÚLTIMO MENSAJE
+        # NUEVO: ver es_repetir() en session.py / ultimo_mensaje() en
+        # tts.py — no cuenta como un comando real, así que no pasa
+        # por intents/IA, solo repite lo último que se dijo (o avisa
+        # que todavía no se dijo nada en esta sesión).
+        # =====================================================
+
+        if es_repetir(comando):
+            ultimo_comando = time.time()
+            texto_previo   = ultimo_mensaje()
+            if texto_previo:
+                hablar(texto_previo)
+            else:
+                hablar("Todavía no dije nada")
             continue
 
         # =====================================================

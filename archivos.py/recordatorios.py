@@ -643,13 +643,29 @@ def listar_recordatorios_ordenados():
 
 
 def cancelar_por_palabra_clave(palabras_clave):
+    """
+    NUEVO: agrega el mismo fallback que ya tiene
+    temporizadores.cancelar_por_palabra_clave() (y que ahí vivía como
+    código inalcanzable — ver el FIX en ese archivo): si el usuario
+    no da ninguna palabra clave ("cancela el recordatorio" a secas) y
+    hay exactamente UN recordatorio pendiente, se cancela ese
+    directamente en vez de responder "no entendí cuál" — es lo más
+    probable que el usuario quiera cuando solo hay uno para elegir.
+    """
     palabras_clave = (palabras_clave or "").strip().lower()
-
-    if not palabras_clave:
-        return False, "No entendí cuál recordatorio quieres cancelar"
 
     with _lock_datos:
         items = list(_recordatorios.items())
+
+    if not palabras_clave:
+        if len(items) == 1:
+            id_str, info = items[0]
+            cancelado = cancelar_recordatorio(id_str)
+            if cancelado:
+                return True, f"Cancelé el recordatorio de {info['texto']}"
+            return False, "No pude cancelar el recordatorio"
+
+        return False, "No entendí cuál recordatorio quieres cancelar"
 
     coincidencias = [
         (id_str, info) for id_str, info in items
@@ -657,6 +673,13 @@ def cancelar_por_palabra_clave(palabras_clave):
     ]
 
     if not coincidencias:
+        if len(items) == 1:
+            id_str, info = items[0]
+            cancelado = cancelar_recordatorio(id_str)
+            if cancelado:
+                return True, f"Cancelé el recordatorio de {info['texto']}"
+            return False, "No pude cancelar el recordatorio"
+
         return False, f"No encontré ningún recordatorio sobre {palabras_clave}"
 
     if len(coincidencias) > 1:
@@ -737,4 +760,3 @@ def reprogramar_pendientes():
 # =========================================================
 
 _cargar()
-            

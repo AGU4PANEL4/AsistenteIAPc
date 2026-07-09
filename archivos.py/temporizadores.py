@@ -278,11 +278,28 @@ def cancelar_por_palabra_clave(palabras_clave):
     """
     palabras_clave = (palabras_clave or "").strip().lower()
 
-    if not palabras_clave:
-        return False, "No entendí cuál temporizador quieres cancelar"
-
     with _lock_datos:
         items = list(_temporizadores.items())
+
+    # FIX: el fallback de "solo hay uno activo, cancelalo" vivía
+    # DESPUÉS del `if not palabras_clave: return ...` de abajo — pero
+    # el caso que ese fallback dice cubrir en el docstring ("cancela
+    # el temporizador" sin decir nombre) es EXACTAMENTE cuando
+    # palabras_clave llega vacío, así que la función retornaba antes
+    # de siquiera llegar a revisarlo. Era código inalcanzable: con
+    # un solo temporizador activo y sin nombrarlo, esto respondía
+    # "no entendí cuál" en vez de cancelar el único que hay, al
+    # revés de lo que el propio comentario decía que debía pasar.
+    if not palabras_clave:
+        if len(items) == 1:
+            id_str, info = items[0]
+            cancelado = cancelar_temporizador(id_str)
+            if cancelado:
+                nombre = info.get("nombre")
+                return True, _mensaje_cancelado(nombre)
+            return False, "No pude cancelar el temporizador"
+
+        return False, "No entendí cuál temporizador quieres cancelar"
 
     coincidencias = [
         (id_str, info) for id_str, info in items

@@ -478,24 +478,27 @@ def limpiar_cache_duplicados():
 # INDEXAR JUEGOS STEAM
 # =========================================================
 
-def indexar_juegos_steam():
-    # FIX: antes esta función hacía games_index.clear() y luego lo
-    # reconstruía entrada por entrada en el mismo diccionario global.
-    # Como esto corre en un hilo daemon en background (ver main.py)
-    # mientras el hilo principal puede estar buscando un juego al mismo
-    # tiempo (buscar_app lee games_index), había una ventana de varios
-    # segundos donde el índice estaba vacío o solo parcialmente lleno
-    # — el usuario podía pedir abrir un juego que SÍ está instalado y
-    # el asistente decir que no lo encuentra, solo por mala suerte de
-    # timing con el reindexado.
-    #
-    # Ahora se construye todo en un diccionario temporal (nuevo_index)
-    # y solo al final se reemplaza games_index de una sola asignación.
-    # Esa asignación es atómica en Python, así que cualquier lectura
-    # desde otro hilo siempre ve o el índice viejo completo, o el nuevo
-    # completo — nunca un estado a medio construir.
-    global games_index
+def _escanear_juegos_steam():
+    """
+    Escanea las bibliotecas de Steam y devuelve un dict {nombre:
+    data} con lo encontrado — función PURA, no toca games_index
+    directamente (ver indexar_juegos() más abajo, que combina esto
+    con _escanear_juegos_epic() en una sola asignación atómica).
 
+    FIX/NUEVO: esto era antes el cuerpo completo de
+    indexar_juegos_steam(), que mutaba games_index directamente al
+    final. Se separó en una función pura porque ahora hay una
+    segunda fuente (Epic Games, ver _escanear_juegos_epic) que
+    también aporta entradas a games_index — si cada una siguiera
+    reemplazando la variable global por su cuenta, dos hilos
+    indexando en paralelo (ver main.py) podrían pisarse uno al otro
+    (el que termine último borraría lo que el otro ya había
+    encontrado). Manteniendo cada scanner puro y combinando recién al
+    final en UNA sola asignación, se preserva la misma garantía que
+    ya tenía esto: cualquier lectura desde otro hilo ve siempre el
+    índice viejo completo o el nuevo completo, nunca una mezcla a
+    medio construir ni el resultado de una fuente pisando a la otra.
+    """
     nuevo_index = {}
 
     steam_path = None
@@ -504,7 +507,7 @@ def indexar_juegos_steam():
         steam_path = Path(winreg.QueryValueEx(clave, "SteamPath")[0])
     except Exception as e:
         print("No se encontró Steam:", e)
-        return
+        return nuevo_index
 
     print("Steam encontrada:", steam_path)
 
@@ -571,7 +574,7 @@ def indexar_juegos_steam():
                         "oculto":   False
                     }
 
-                    print("Juego encontrado:", nombre)
+                    print("Juego Steam encontrado:", nombre)
                     total += 1
 
                 except Exception as e:
@@ -579,9 +582,142 @@ def indexar_juegos_steam():
         except Exception as e:
             print("Error biblioteca:", e)
 
+    print(f"Juegos Steam encontrados: {total}")
+    return nuevo_index
+
+# =========================================================
+# INDEXAR JUEGOS EPIC GAMES
+# NUEVO: hasta ahora solo se indexaban juegos de Steam — cualquier
+# juego de Epic Games Store (Fortnite el caso más conocido, pero
+# aplica a cualquier otro) dependía por completo de la búsqueda
+# genérica en disco (buscar_en_ruta/buscar_con_loading), que:
+#
+#   1. Puede no encontrarlo si está instalado fuera de las rutas
+#      "rápidas" (Epic deja elegir cualquier carpeta/disco al
+#      instalar, y muchos juegos de Epic no crean acceso directo en
+#      el menú Inicio, a diferencia de la mayoría de instaladores
+#      tradicionales).
+#   2. Aunque lo encuentre, terminaría ejecutando el .exe del juego
+#      DIRECTAMENTE (ej. FortniteClient-Win64-Shipping.exe) — varios
+#      juegos de Epic (Fortnite incluido) usan Easy Anti-Cheat u
+#      otras protecciones que EXIGEN iniciarse a través del Epic
+#      Games Launcher. Ejecutar el .exe directo lo abre un instante
+#      y lo cierra con un error de anti-cheat, en vez de jugarlo de
+#      verdad — probablemente la causa real de "abrir fortnite no
+#      funciona".
+#
+# La solución es la misma que ya existía para Steam: en vez de
+# buscar el .exe en disco, se lee el catálogo local de manifests que
+# el propio Epic Games Launcher mantiene (un archivo .item en
+# formato JSON por juego instalado) y se lanza por su protocolo
+# propio (com.epicgames.launcher://apps/...), exactamente como
+# steam://rungameid/... resuelve el mismo problema para Steam — es
+# el LAUNCHER quien arranca el juego, con todo lo que necesita
+# (autenticación, anti-cheat) ya inicializado.
+# =========================================================
+
+CARPETA_MANIFESTS_EPIC = Path("C:/ProgramData/Epic/EpicGamesLauncher/Data/Manifests")
+
+
+def _escanear_juegos_epic():
+    """
+    Escanea los manifests locales de Epic Games Launcher y devuelve
+    un dict {nombre: data} con lo encontrado — función PURA, mismo
+    motivo que _escanear_juegos_steam() (ver ese comentario).
+
+    Cada archivo .item es un JSON con (entre otros) DisplayName
+    (nombre para mostrar), AppName (identificador interno que usa el
+    protocolo de lanzamiento) e InstallLocation (carpeta de
+    instalación) — no hace falta ni encontrar ni ejecutar ningún
+    .exe directamente, el AppName alcanza para que el propio Epic
+    Games Launcher se encargue de todo.
+    """
+    nuevo_index = {}
+
+    if not CARPETA_MANIFESTS_EPIC.exists():
+        print("No se encontró Epic Games Launcher (o no tiene juegos instalados)")
+        return nuevo_index
+
+    print("Epic Games Launcher encontrado:", CARPETA_MANIFESTS_EPIC)
+
+    total = 0
+
+    for manifest in CARPETA_MANIFESTS_EPIC.glob("*.item"):
+        try:
+            data = json.loads(manifest.read_text(encoding="utf-8", errors="ignore"))
+
+            nombre_mostrado  = data.get("DisplayName", "")
+            app_name         = data.get("AppName", "")
+            ruta_instalacion = data.get("InstallLocation", "")
+
+            # bIsApplication distingue juegos/apps reales de
+            # herramientas internas del motor (ej. el propio Unreal
+            # Engine se instala también como una entrada de manifest
+            # cuando se usa como base de otro juego) — si el campo no
+            # está presente, se asume True (mejor mostrar de más que
+            # perderse un juego real por un campo ausente)
+            if data.get("bIsApplication") is False:
+                continue
+
+            if not nombre_mostrado or not app_name:
+                continue
+
+            nombre = limpiar_nombre(nombre_mostrado)
+
+            if nombre in nuevo_index:
+                continue
+
+            nuevo_index[nombre] = {
+                "ruta":     ruta_instalacion or str(manifest),
+                "app_name": app_name,
+                "tipo":     "epic",
+                "exe_name": nombre_mostrado,
+                "oculto":   False,
+            }
+
+            print("Juego Epic encontrado:", nombre)
+            total += 1
+
+        except Exception as e:
+            print("Error manifest Epic:", manifest.name, e)
+
+    print(f"Juegos Epic encontrados: {total}")
+    return nuevo_index
+
+# =========================================================
+# INDEXAR JUEGOS (STEAM + EPIC)
+# =========================================================
+
+def indexar_juegos():
+    """
+    Indexa juegos de todas las plataformas soportadas (Steam, Epic
+    Games) en un solo games_index combinado.
+
+    FIX/NUEVO: ambos scanners son funciones puras que devuelven su
+    propio dict sin tocar games_index — se combinan acá y recién al
+    final se hace UNA sola asignación atómica, preservando la misma
+    garantía que ya tenía el indexado de Steam (ver el comentario
+    detallado en _escanear_juegos_steam): cualquier lectura desde
+    otro hilo (buscar_app corriendo mientras esto todavía está
+    indexando) ve siempre el índice viejo completo o el nuevo
+    completo, nunca una mezcla a medio construir.
+    """
+    global games_index
+
+    nuevo_index = {}
+    nuevo_index.update(_escanear_juegos_steam())
+    nuevo_index.update(_escanear_juegos_epic())
+
     games_index = nuevo_index
     guardar_games_index()
-    print(f"Juegos Steam indexados: {total}")
+
+    print(f"Total juegos indexados: {len(games_index)}")
+
+
+# alias por compatibilidad — el nombre viejo indexaba solo Steam;
+# ahora indexa todas las plataformas soportadas desde la misma
+# llamada, sin que main.py necesite saber que se agregó Epic.
+indexar_juegos_steam = indexar_juegos
 
 # =========================================================
 # INDEXAR APPS

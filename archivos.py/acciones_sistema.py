@@ -403,3 +403,60 @@ def normalizar(texto: str) -> str:
     texto = texto.lower().strip()
     texto = re.sub(r"[^a-z0-9]", "", texto)
     return texto
+
+# =========================================================
+# AYUDA
+# NUEVO: con todo lo que fue acumulando el asistente (apps, media,
+# recordatorios, temporizadores, macros, alias, no molestar,
+# actualizaciones, inicio automático), no había ninguna forma de
+# preguntarle "¿qué puedes hacer?" — si alguien más lo usa, o si vos
+# mismo te olvidás de un comando puntual, no quedaba otra que
+# adivinar o revisar el código. Esto da un resumen corto por
+# categoría en vez de listar cada comando exacto uno por uno (sería
+# demasiado largo para escuchar de corrido) — sirve como punto de
+# partida, no como referencia exhaustiva.
+# =========================================================
+
+def ayuda_accion(valor=None):
+    mensaje = (
+        "Puedo ayudarte con varias cosas: "
+        "abrir, cerrar, minimizar o maximizar apps y juegos; "
+        "controlar música y video (pausar, siguiente, volumen); "
+        "recordatorios y temporizadores; "
+        "macros para encadenar varias acciones con un solo comando; "
+        "alias para que reconozca mejor los nombres que uses; "
+        "modo no molestar; "
+        "inicio automático con Windows; "
+        "y buscar actualizaciones del asistente. "
+        "También podés preguntarme cosas y charlar normalmente. "
+        "Decime, por ejemplo, \"crea una macro\" o \"registra un alias\" "
+        "si querés que te guíe paso a paso con alguna de esas."
+    )
+    return True, mensaje
+
+# =========================================================
+# CONVERSIÓN DE UNIDADES
+# FIX/NUEVO: antes este era un pass-through simple — asumía que
+# `valor` YA era el texto de respuesta calculado por intents.py. Eso
+# funcionaba mientras el ÚNICO camino para llegar acá fuera la regla
+# rápida de intents.py (que sí calcula todo antes de devolver el
+# intent) — pero ahora interpretar_con_ia() (ia.py) también puede
+# reconocer una conversión que esa regla rápida no matcheó (una frase
+# rara, por ejemplo "a cuántos metros equivalen 5 kilómetros"), y en
+# ESE camino la IA solo reformula la pregunta a un formato simple
+# ("5 kilometros a metros"), nunca hace la cuenta ella misma — la
+# cuenta la sigue haciendo SIEMPRE conversiones.py, con matemática
+# pura, sin importar por cuál de los dos caminos se llegó acá. Esta
+# función ahora corre detectar_conversion() de verdad sobre `valor`
+# en vez de asumir que ya viene resuelto.
+# =========================================================
+
+def conversion_accion(valor=None):
+    from conversiones import detectar_conversion
+
+    resultado = detectar_conversion(valor)
+
+    if not resultado:
+        return False, "No entendí esa conversión"
+
+    return True, resultado

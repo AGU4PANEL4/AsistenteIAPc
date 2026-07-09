@@ -1,6 +1,19 @@
 sesion = {
     "activa":    False,
     "cancelar":  False,  # se pone True cuando el usuario dice la palabra de cancelación
+    # NUEVO: True mientras el asistente está en "modo dormido" (ver
+    # es_dormir() más abajo) — suspende la reacción a la wake word
+    # normal hasta que se diga la palabra de despertar, para quien
+    # quiera privacidad/silencio un rato sin cerrar el asistente del
+    # todo. Ver el manejo completo en main.py.
+    "dormido":   False,
+    # NUEVO: True si fue "duérmete" quien activó no_molestar (no el
+    # usuario por su cuenta) — ver el FIX detallado en main.py, en el
+    # bloque de es_dormir()/despertar. Distingue "no_molestar está
+    # activo porque me dormí" de "no_molestar ya estaba activo antes
+    # de dormirme, con su propia duración" — para no pisar ni cortar
+    # antes de tiempo una duración que el usuario eligió a propósito.
+    "dormido_activo_no_molestar": False,
 }
 
 # =========================================================
@@ -84,3 +97,53 @@ def es_despedida(texto):
         return False
     texto = _quitar_fillers(texto.lower().strip())
     return texto in FRASES_DESPEDIDA
+
+# =========================================================
+# REPETIR ÚLTIMO MENSAJE
+# NUEVO: si el usuario no llegó a escuchar bien lo último que dijo
+# el asistente (ruido de fondo, se distrajo, o lo cortó sin querer
+# con el barge-in), puede pedir que lo repita en vez de tener que
+# adivinar o repetir su propio comando desde cero.
+# =========================================================
+
+FRASES_REPETIR = {
+    "repite", "repítelo", "repitelo",
+    "qué dijiste", "que dijiste",
+    "no te escuché", "no te escuche",
+    "no escuché", "no escuche",
+    "puedes repetir", "puedes repetirlo",
+    "otra vez qué dijiste", "otra vez que dijiste",
+    "cómo dijiste", "como dijiste",
+}
+
+def es_repetir(texto):
+    if not texto:
+        return False
+    texto = _quitar_fillers(texto.lower().strip())
+    return texto in FRASES_REPETIR
+
+# =========================================================
+# MODO DORMIDO
+# NUEVO: suspende la reacción del asistente a la wake word normal
+# hasta que se diga la palabra de despertar (ver DESPIERTA_WORD) —
+# para quien quiera privacidad/apagar el micrófono lógicamente un
+# rato sin cerrar el asistente del todo (y sin perder recordatorios/
+# temporizadores en curso, que siguen corriendo igual). Se activa
+# SOLO durante una sesión ya activa (después de la wake word normal),
+# igual que despedida/cancelación.
+# =========================================================
+
+FRASES_DORMIR = {
+    "duérmete", "duermete",
+    "ponte a dormir", "vete a dormir",
+    "modo silencioso", "silencio total",
+    "deja de escuchar",
+}
+
+DESPIERTA_WORD = "despierta"
+
+def es_dormir(texto):
+    if not texto:
+        return False
+    texto = _quitar_fillers(texto.lower().strip())
+    return texto in FRASES_DORMIR

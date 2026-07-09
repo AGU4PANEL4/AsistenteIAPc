@@ -21,6 +21,13 @@ from datetime import datetime, timedelta
 
 from logger import log
 
+# NUEVO: refleja el estado en el indicador de la UI (ver ui.py,
+# _dibujar_orbe) — import directo y a nivel de módulo porque
+# ui_estado.py no tiene dependencias pesadas (solo threading/datetime,
+# nada de Tkinter en sí), así que no hay riesgo de import circular ni
+# de arrastrar la UI completa solo por importar esto.
+from ui_estado import set_no_molestar as _set_no_molestar_ui
+
 # =========================================================
 # ESTADO
 # =========================================================
@@ -90,7 +97,33 @@ def _hilo_esperar_expiracion(hasta):
     Duerme hasta que el modo expira y luego reproduce los diferidos.
     Duerme en tramos de 30s para no quedar bloqueado si el modo se
     desactiva manualmente antes de tiempo.
+
+    FIX: a esta función le faltaba `global _activo_hasta` — como más
+    abajo SÍ hay una asignación a esa variable (`_activo_hasta = None`
+    en la limpieza de estado), Python trata `_activo_hasta` como
+    LOCAL en TODA la función por esa sola asignación, incluida la
+    lectura de la primera línea del while, que ocurre ANTES en el
+    código pero no en el análisis de scope de Python (que es por
+    función completa, no línea por línea). Resultado: el hilo se
+    caía con UnboundLocalError casi apenas arrancaba, en la primera
+    vuelta del while — silenciosamente, porque las excepciones de un
+    hilo daemon no tumban el programa, solo imprimen un traceback en
+    stderr que fácilmente pasa desapercibido en la consola.
+    
+    Esto significaba que la expiración automática de no molestar
+    JAMÁS funcionaba de verdad — ni el aviso hablado "el modo no
+    molestar terminó", ni la reproducción automática de los avisos
+    diferidos al cumplirse el tiempo. Solo funcionaba si alguien
+    llamaba a desactivar() a mano (esa función sí tiene su propio
+    `global _activo_hasta` correcto). Con la wake word normal esto
+    pasaba menos desapercibido (uno nota si el asistente no avisó
+    algo en un rato), pero con el modo dormido (ver main.py) el
+    problema se agravaba: si te quedabas dormido de verdad y no
+    decías "despierta", los avisos acumulados durante el no molestar
+    de 12 horas iban a quedar esperando para siempre.
     """
+    global _activo_hasta
+
     while True:
         with _lock:
             # si el estado cambió (desactivado manualmente o nueva
@@ -115,6 +148,8 @@ def _hilo_esperar_expiracion(hasta):
     with _lock:
         if _activo_hasta == _activo_hasta_ref:
             _activo_hasta = None
+
+    _set_no_molestar_ui(False)
 
     print("[No molestar] Modo terminado, reproduciendo avisos diferidos...")
     from tts import hablar
@@ -147,6 +182,8 @@ def activar(minutos):
     )
     _hilo_expiracion.start()
 
+    _set_no_molestar_ui(True)
+
     print(f"[No molestar] Activado por {minutos} minutos (hasta {hasta.strftime('%H:%M')})")
     log.info(f"Modo no molestar activado por {minutos} minutos")
 
@@ -166,6 +203,8 @@ def desactivar():
 
     if not estaba_activo:
         return False, "El modo no molestar no estaba activo"
+
+    _set_no_molestar_ui(False)
 
     print("[No molestar] Desactivado manualmente")
     log.info("Modo no molestar desactivado manualmente")

@@ -14,7 +14,7 @@ from tts import hablar
 from voice import escuchar
 from macros import guardar_macro, listar_macros, eliminar_macro, obtener_macro
 from intents import detectar_intent
-from voz_utils import elegir_de_lista, interpretar_confirmacion
+from voz_utils import elegir_de_lista, interpretar_confirmacion, describir_paso, escuchar_con_reintento
 
 # =========================================================
 # HELPERS
@@ -27,39 +27,11 @@ PALABRAS_PASO = ["y también", "y luego", "luego", "después", "despues",
                  "también", "tambien", "y"]
 
 
+# FIX/NUEVO: unificada con registrar_alias.py en
+# escuchar_con_reintento() (voz_utils.py) — agrega soporte para
+# "espera"/"dame un segundo" sin tocar las llamadas existentes.
 def _escuchar_con_timeout(timeout=10):
-    inicio = time.time()
-    while True:
-        respuesta = escuchar()
-        if respuesta:
-            return respuesta
-        if time.time() - inicio > timeout:
-            return ""
-
-
-def _describir_paso(intent, valor):
-    """Convierte (intent, valor) en una frase legible para hablarle al
-    usuario mientras se construye la macro paso a paso."""
-    descripciones = {
-        "abrir_app":           f"abrir {valor}",
-        "cerrar_app":          f"cerrar {valor}",
-        "minimizar_app":       f"minimizar {valor}",
-        "maximizar_app":       f"maximizar {valor}",
-        "media_pausar":        "pausar",
-        "media_reanudar":      "reanudar",
-        "media_siguiente":     "siguiente canción",
-        "media_anterior":      "canción anterior",
-        "media_subir_volumen": "subir volumen",
-        "media_bajar_volumen": "bajar volumen",
-        "media_silenciar":     "silenciar",
-        "media_volumen_exacto": f"volumen al {valor.split('|')[-1].strip()}",
-        "buscar_google":       f"buscar en Google: {valor}",
-        "abrir_youtube":       f"buscar en YouTube: {valor}",
-        "abrir_url":           f"abrir {valor}",
-        "activar_startup":     "activar inicio automático",
-        "desactivar_startup":  "desactivar inicio automático",
-    }
-    return descripciones.get(intent, f"{intent} {valor}".strip())
+    return escuchar_con_reintento(timeout=timeout)
 
 
 # =========================================================
@@ -128,7 +100,7 @@ def crear_macro_guiado(valor=None):
             continue
 
         pasos.append({"intent": intent, "valor": valor_paso or ""})
-        descripcion = _describir_paso(intent, valor_paso or "")
+        descripcion = describir_paso(intent, valor_paso or "")
         hablar(f"Agregado: {descripcion}. ¿Siguiente acción?")
 
     if not pasos:
@@ -136,7 +108,7 @@ def crear_macro_guiado(valor=None):
         return False, None
 
     # ── PASO 3: confirmar y guardar ───────────────────────
-    resumen = ", ".join(_describir_paso(p["intent"], p["valor"]) for p in pasos)
+    resumen = ", ".join(describir_paso(p["intent"], p["valor"]) for p in pasos)
     hablar(f"La macro \"{nombre}\" tiene {len(pasos)} pasos: {resumen}. ¿La guardo?")
 
     confirmacion = _escuchar_con_timeout(timeout=10)

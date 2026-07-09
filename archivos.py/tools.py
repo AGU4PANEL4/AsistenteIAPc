@@ -5,7 +5,7 @@ from acciones_sistema import (
     cancelar_recordatorio_accion, crear_temporizador_accion,
     listar_temporizadores_accion, cancelar_temporizador_accion,
     activar_no_molestar, desactivar_no_molestar, estado_no_molestar,
-    crear_recordatorio_recurrente_accion,
+    crear_recordatorio_recurrente_accion, ayuda_accion, conversion_accion,
 )
 from media_control import (
     media_pausa_reanuda,
@@ -57,4 +57,8 @@ TOOLS = {
     "eliminar_macro":      eliminar_macro_guiado,
     # actualizaciones
     "buscar_actualizacion": buscar_actualizacion_ahora,
+    # ayuda
+    "ayuda":                ayuda_accion,
+    # conversión de unidades
+    "conversion_unidades":  conversion_accion,
 }

@@ -241,7 +241,14 @@ def detectar_intent(comando):
     ABRIR_ESTO = [
         "ábrelo", "abrelo",
         "abre eso", "abre esto",
-        "ábrela", "abrela"
+        "ábrela", "abrela",
+        # FIX/NUEVO: "otra vez"/"de nuevo" sueltos (sin "ábrelo" antes)
+        # ya estaban MENCIONADOS en el comentario de abajo como algo
+        # que debía funcionar, pero nunca se habían agregado de
+        # verdad a ninguna lista — decir solamente "otra vez" caía
+        # sin reconocerse. Al vivir en ABRIR_ESTO, usan exactamente
+        # el mismo dato (`ultima`) que "ábrelo".
+        "otra vez", "de nuevo",
     ]
 
     MINIMIZAR_ESTO = [
@@ -957,6 +964,52 @@ def detectar_intent(comando):
         resto = comando.replace("volumen ", "", 1).strip()
         if resto in NUMEROS_TEXTO:
             return "media_volumen_exacto", NUMEROS_TEXTO[resto]
+
+    # =====================================================
+    # AYUDA
+    # NUEVO: "¿qué puedes hacer?" y variantes — resumen de
+    # capacidades del asistente (ver ayuda_accion en
+    # acciones_sistema.py). Se revisa temprano, junto a los demás
+    # intents de frase fija, antes de que cualquier regla más
+    # genérica pueda malinterpretar alguna de estas frases.
+    # =====================================================
+
+    AYUDA = {
+        "ayuda", "necesito ayuda",
+        "qué puedes hacer", "que puedes hacer",
+        "qué sabes hacer", "que sabes hacer",
+        "qué comandos tienes", "que comandos tienes",
+        "qué cosas puedes hacer", "que cosas puedes hacer",
+        "cómo te uso", "como te uso",
+        "cómo funcionas", "como funcionas",
+        "qué puedo pedirte", "que puedo pedirte",
+    }
+
+    if comando in AYUDA:
+        return "ayuda", ""
+
+    # =====================================================
+    # CONVERSIÓN DE UNIDADES
+    # NUEVO: se revisa temprano, junto a AYUDA — es una pregunta,
+    # no una acción sobre una app, así que no tiene sentido que
+    # compita con las reglas de ABRIR/CERRAR/MEDIA de más abajo. Se
+    # resuelve con matemática pura en conversiones.py (sin pasar por
+    # la IA — ver el comentario detallado ahí), y devuelve la
+    # respuesta YA CALCULADA como valor, lista para hablar.
+    # =====================================================
+
+    from conversiones import detectar_conversion
+    resultado_conversion = detectar_conversion(comando)
+    if resultado_conversion:
+        # NUEVO: se pasa el COMANDO tal cual (no el resultado ya
+        # calculado) — ver el FIX en acciones_sistema.conversion_accion
+        # para el motivo: ahora ese mismo cálculo también lo puede
+        # disparar interpretar_con_ia() (ia.py) cuando la frase no
+        # matchea acá pero la IA sí reconoce que es una conversión, y
+        # las dos rutas deben calcular exactamente igual (con
+        # matemática pura, nunca confiando en que la IA haga la
+        # cuenta).
+        return "conversion_unidades", comando
 
     # =====================================================
     # REGISTRAR ALIAS

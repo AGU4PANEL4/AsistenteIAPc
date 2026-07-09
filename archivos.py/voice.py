@@ -1,5 +1,6 @@
 import concurrent.futures
 import threading
+import unicodedata
 import numpy as np
 import speech_recognition as sr
 from faster_whisper import WhisperModel
@@ -58,6 +59,24 @@ recognizer.dynamic_energy_threshold = True
 # lento, porque ya no hay que esperar una respuesta de Google.
 recognizer.pause_threshold          = 0.9
 
+# FIX/REVERTIDO: se había subido esto de 0.3 a 0.5 para atacar el
+# problema de "letras al azar" (ver el FIX de _parece_gibberish más
+# abajo) — pero phrase_threshold actúa en la CAPTURA, antes de que
+# Whisper vea nada: si la voz real no sostiene 0.5s continuos de
+# energía por encima del umbral desde el primer instante (algo que
+# varía con el micrófono, la distancia, cómo arranca cada quien a
+# hablar), recognizer.listen() directamente descarta el intento —
+# nunca llega a transcribirse, sea real o no. Esto causó el efecto
+# contrario al buscado: comandos reales dejaron de detectarse por
+# completo ("no detecta nada"), un problema peor que el que se
+# quería resolver.
+#
+# Se vuelve al valor original (0.3, el default de la librería) — la
+# defensa contra "letras al azar" ahora corre DESPUÉS de la
+# transcripción (ver _parece_gibberish/_filtrar_resultado), un lugar
+# más seguro: solo descarta resultados que ya se transcribieron y
+# resultaron ser basura obvia, sin arriesgar perder audio real que
+# ni siquiera llegó a intentarse transcribir.
 recognizer.phrase_threshold         = 0.3
 recognizer.non_speaking_duration    = 0.5
 
@@ -227,11 +246,22 @@ except Exception as e:
 # La wake word es una sola palabra corta y conocida, con tolerancia
 # difusa en la comparación (ver wakeword.py, 80% de parecido) — no
 # necesita ni de lejos la capacidad del modelo "small". Un modelo
-# "tiny" (bastante más liviano en cómputo) con muy pocos hilos
-# asignados a propósito (2, deliberadamente bajo — acá se prioriza
-# techo de CPU sobre velocidad, a diferencia del modelo principal)
-# alcanza de sobra para reconocer si lo que se dijo se parece a
-# "jarvis", a una fracción del costo de CPU por cada intento.
+# más liviano, con pocos hilos asignados a propósito (2,
+# deliberadamente bajo — acá se prioriza techo de CPU sobre
+# velocidad, a diferencia del modelo principal), alcanza de sobra
+# para reconocer si lo que se dijo se parece a "jarvis", a una
+# fracción del costo de CPU por cada intento.
+#
+# FIX: el comentario original describía esto como el modelo "tiny"
+# (la opción más liviana de faster-whisper), pero el código de más
+# abajo usa "base" — un escalón más preciso que "tiny", aunque
+# también algo más costoso en CPU. No hay registro de por qué se
+# cambió (probablemente "tiny" no rendía lo suficiente en pruebas
+# reales, pero no hay como confirmarlo desde acá) — este comentario
+# se corrige para describir lo que el código realmente hace hoy. Si
+# el uso de CPU en este loop constante es un problema real para vos,
+# "tiny" sigue siendo una opción válida para probar — es un cambio
+# de una sola línea (MODELO_WHISPER_WAKEWORD más abajo).
 #
 # El modelo "small" principal NO se toca y sigue siendo el que
 # transcribe comandos reales una vez la sesión está activa — ahí sí
@@ -330,6 +360,17 @@ def _transcribir_whisper(audio_data, initial_prompt=None, beam_size=5, hotwords=
     # que sí hubo voz — mismo mecanismo ya usado en groq_cliente.py
     # para la transcripción en la nube (ver transcribir_groq), ahora
     # aplicado también acá para el Whisper local.
+    #
+    # FIX/REVERTIDO: bajado de 0.6 a 0.5 en un intento anterior de
+    # atacar "letras al azar", pero este umbral corre POR SEGMENTO
+    # sobre audio que YA se transcribió — apretarlo de más arriesga
+    # descartar segmentos con voz real dicha con ruido de fondo
+    # normal (que no da no_speech_prob cercano a 0, sino algo
+    # intermedio), justo lo que se reportó como "a veces no detecta
+    # nada". Vuelve a 0.6 — la defensa contra resultados sin sentido
+    # ahora vive en _parece_gibberish/_filtrar_resultado, que actúa
+    # sobre el TEXTO final ya completo, un lugar más seguro para
+    # filtrar sin arriesgar perder contenido real a mitad de camino.
     UMBRAL_NO_SPEECH = 0.6
 
     segmentos = list(segmentos)
@@ -381,6 +422,117 @@ def _transcribir_con_timeout(audio_data, timeout=None, initial_prompt=None, beam
         return None
 
 
+# =========================================================
+# FRASES FANTASMA CONOCIDAS
+# NUEVO: Whisper (cualquier variante — local o en la nube, Groq
+# incluido) tiene un comportamiento AMPLIAMENTE documentado de
+# "alucinar" frases hechas sobre silencio o ruido de fondo bajo, sin
+# relación real con lo que se dijo — heredado de patrones muy
+# repetidos en los datos con los que se entrenó (subtítulos de
+# YouTube/TV). No es un problema de este proyecto en particular, es
+# un comportamiento conocido del modelo en general, y vad_filter +
+# el filtro de no_speech_prob (ver más arriba) no siempre lo atrapan
+# — a veces el segmento SÍ tiene energía real (ruido de fondo con
+# volumen normal, no silencio puro), así que no_speech_prob da un
+# valor bajo aunque el "contenido" transcrito sea pura alucinación.
+#
+# Se descartan por coincidencia de texto (normalizado, sin tildes)
+# contra esta lista corta de frases bien conocidas — no es un intento
+# de cubrir TODAS las alucinaciones posibles (imposible), solo las
+# más frecuentes y reconocibles, que además son inconfundibles: nadie
+# le dice a su asistente de voz "suscríbete a mi canal".
+# =========================================================
+
+_FRASES_FANTASMA_CONOCIDAS = {
+    "subtitulos realizados por la comunidad de amara.org",
+    "subtitulado por la comunidad de amara.org",
+    "gracias por ver el video",
+    "gracias por ver este video",
+    "suscribete a mi canal",
+    "suscribete al canal",
+    "dale like y suscribete",
+    "no olvides suscribirte",
+    "mas videos en mi canal",
+    "nos vemos en el proximo video",
+    "www.youtube.com",
+}
+
+
+def _es_frase_fantasma_conocida(texto):
+    """True si `texto` coincide con alguna alucinación bien conocida
+    de Whisper (ver el comentario de arriba) — se compara sin tildes
+    y sin mayúsculas, permitiendo que la frase aparezca como parte de
+    un resultado más largo (a veces Whisper agrega un poco de ruido
+    alrededor de la alucinación central)."""
+    if not texto:
+        return False
+
+    normalizado = unicodedata.normalize("NFKD", texto.lower())
+    normalizado = "".join(c for c in normalizado if not unicodedata.combining(c))
+
+    return any(frase in normalizado for frase in _FRASES_FANTASMA_CONOCIDAS)
+
+
+# =========================================================
+# GIBBERISH ("letras al azar")
+# NUEVO: distinto del caso de arriba (frases hechas y coherentes que
+# Whisper repite de sus datos de entrenamiento) — acá el síntoma es
+# un puñado de letras SIN sentido, típico cuando un clip de audio muy
+# corto (un clic, un golpe, un ruido breve que igual logró superar
+# phrase_threshold — ver el FIX ahí) no tiene ninguna palabra real
+# adentro, pero Whisper igual devuelve "algo" en vez de vacío.
+#
+# El filtro es deliberadamente simple y conservador: en español, TODA
+# palabra real tiene al menos una vocal (ninguna sílaba existe sin
+# núcleo vocálico) — un resultado sin ninguna vocal, o de una sola
+# letra, no puede ser una palabra real dicha en español. No intenta
+# detectar CUALQUIER alucinación (imposible sin falsos positivos),
+# solo el caso más obvio y seguro de filtrar.
+# =========================================================
+
+_VOCALES = set("aeiouáéíóúü")
+
+
+def _parece_gibberish(texto):
+    """True si `texto` no puede ser una palabra real en español —
+    vacío, de una sola letra, o sin ninguna vocal. Las respuestas
+    numéricas ("50", "12.5") se excluyen a propósito: son válidas
+    (ej. un volumen exacto) y no tienen por qué contener vocales."""
+    texto = (texto or "").strip().lower()
+
+    if len(texto) < 2:
+        return True
+
+    if any(c.isdigit() for c in texto):
+        return False
+
+    letras = [c for c in texto if c.isalpha()]
+
+    if not letras:
+        return True
+
+    return not any(c in _VOCALES for c in letras)
+
+
+def _filtrar_resultado(texto):
+    """Punto único por el que pasan los 3 caminos de transcripción
+    (Groq, Whisper local, Google) antes de devolver el resultado —
+    descarta alucinaciones conocidas y gibberish obvio, convirtiéndolos
+    en "" (mismo resultado que "no se escuchó nada", que ya sabe
+    manejar todo el resto del código)."""
+    if _es_frase_fantasma_conocida(texto):
+        print(f"[Whisper] Descartada frase fantasma conocida: {texto!r}")
+        log.info(f"Frase fantasma conocida descartada: {texto!r}")
+        return ""
+
+    if _parece_gibberish(texto):
+        print(f"[Whisper] Descartado resultado sin sentido: {texto!r}")
+        log.info(f"Resultado tipo gibberish descartado: {texto!r}")
+        return ""
+
+    return texto
+
+
 def _transcribir(audio_data, initial_prompt=None, beam_size=5, hotwords=None,
                   permitir_groq=True, modelo=None):
     """
@@ -419,18 +571,33 @@ FIX/NUEVO: permitir_groq=False fuerza a NO usar Groq sin importar
 
         wav_bytes = audio_data.get_wav_data(convert_rate=16000, convert_width=2)
 
-        # el prompt de contexto de Groq cumple el mismo rol que
-        # initial_prompt/hotwords en el Whisper local — se combinan
-        # ambos si están presentes, priorizando initial_prompt (más
-        # corto y específico, ej. la wake word) sobre hotwords (lista
-        # larga de nombres de apps) si por algún motivo se pasaran
-        # los dos juntos en una misma llamada
-        contexto = initial_prompt or hotwords
+        # FIX: el comentario de arriba decía "se combinan ambos si
+        # están presentes" pero el código anterior hacía
+        # `contexto = initial_prompt or hotwords` — un OR, no una
+        # combinación real: si ambos venían con datos, hotwords (la
+        # lista de nombres de apps/juegos) se DESCARTABA por completo,
+        # quedándose solo con initial_prompt. Esto nunca se notó en la
+        # práctica porque, hasta ahora, ningún llamador pasaba los dos
+        # a la vez con datos reales en ambos — pero escuchar_wake_word()
+        # SÍ pasa initial_prompt+hotwords juntos (ver más abajo), así
+        # que el bug era real y alcanzable, solo que en ese caso
+        # específico hotwords es una sola palabra corta (la wake word)
+        # y perderla no se notaba tanto como perdería la lista completa
+        # de nombres de apps si algún día otro llamador combina los dos.
+        #
+        # Ahora se concatenan de verdad los dos, cuando ambos están
+        # presentes — Groq solo recibe un campo de texto libre como
+        # contexto (a diferencia de Whisper local, que sí distingue
+        # initial_prompt de hotwords como parámetros separados), así
+        # que combinarlos en un solo string es la forma correcta de
+        # no perder ninguno de los dos.
+        partes_contexto = [p for p in (initial_prompt, hotwords) if p]
+        contexto = ". ".join(partes_contexto) if partes_contexto else None
 
         texto = transcribir_groq(wav_bytes, prompt_contexto=contexto)
 
         if texto is not None:
-            return texto.lower()
+            return _filtrar_resultado(texto.lower())
 
         print("[Groq] Transcripción falló, usando Whisper local como respaldo")
         log.warning("Groq Whisper falló, cayendo a Whisper local")
@@ -441,15 +608,15 @@ FIX/NUEVO: permitir_groq=False fuerza a NO usar Groq sin importar
     )
 
     if texto is not None:
-        return texto.lower()
+        return _filtrar_resultado(texto.lower())
 
     print("[Whisper] No disponible, usando Google como respaldo")
 
     try:
-        return recognizer.recognize_google(
+        return _filtrar_resultado(recognizer.recognize_google(
             audio_data,
             language="es-CO"
-        ).lower()
+        ).lower())
     except sr.UnknownValueError:
         return ""
     except sr.RequestError:
@@ -631,15 +798,23 @@ def escuchar_wake_word(wake_word):
     # sin perder la wake word gracias a la tolerancia difusa de
     # detectar_wakeword().
     #
-    # modelo=_modelo_whisper_wakeword — usa el modelo "tiny" liviano
-    # dedicado (ver el comentario completo junto a su carga, más
-    # arriba) en vez del modelo "small" principal, para reducir aún
-    # más el uso de CPU en esta ruta de loop constante. Si ese modelo
-    # no se pudo cargar (None), _transcribir_whisper cae automática-
-    # mente al modelo principal — la wake word sigue funcionando.
+    # modelo=_modelo_whisper_wakeword — usa el modelo liviano dedicado
+    # (ver el comentario completo junto a su carga, más arriba) en vez
+    # del modelo "small" principal, para reducir aún más el uso de CPU
+    # en esta ruta de loop constante. Si ese modelo no se pudo cargar
+    # (None), _transcribir_whisper cae automáticamente al modelo
+    # principal — la wake word sigue funcionando.
+    #
+    # NUEVO: hotwords=wake_word además de initial_prompt — son dos
+    # mecanismos de sesgo DISTINTOS en faster-whisper (initial_prompt
+    # influye el ESTILO general esperado; hotwords da prioridad de
+    # reconocimiento a un término puntual, sin el límite de 224
+    # tokens ni el efecto de "estilo" de initial_prompt) — usar los
+    # dos juntos para la wake word es el uso recomendado cuando hay UN
+    # término específico que de verdad importa reconocer bien.
     return _transcribir(
         audio, initial_prompt=prompt, beam_size=1, permitir_groq=False,
-        modelo=_modelo_whisper_wakeword,
+        modelo=_modelo_whisper_wakeword, hotwords=wake_word,
     )
 
 # =========================================================
@@ -677,7 +852,24 @@ def escuchar_confirmacion(timeout=8):
 
 # =========================================================
 # ESCUCHAR NORMAL
+# FIX/REVERTIDO: se había agregado acá un initial_prompt de contexto
+# ("Comandos de voz en español para un asistente personal: abrir o
+# cerrar aplicaciones... crear recordatorios y temporizadores...") con
+# la idea de sesgar a Whisper hacia el vocabulario típico de comandos.
+# En la práctica generó el efecto CONTRARIO al buscado: un initial_
+# prompt largo y con vocabulario específico es exactamente el patrón
+# que más alucinaciones produce en Whisper — el modelo, ante audio
+# ambiguo (ruido de fondo, silencio con algo de energía), tiende a
+# "completar" hacia palabras parecidas a las del prompt en vez de
+# quedarse en blanco. Después de agregar esto empezaron a reportarse
+# comandos fantasma que nadie dijo — coincide con el patrón conocido.
+#
+# hotwords (nombres de apps/juegos) se mantiene — es un mecanismo de
+# sesgo más quirúrgico (prioriza reconocer términos puntuales SIN el
+# efecto de "estilo/continuación" que tiene initial_prompt) y no
+# generó este problema.
 # =========================================================
+
 
 def escuchar():
 

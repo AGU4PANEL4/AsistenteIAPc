@@ -4,7 +4,7 @@ from voice import escuchar
 from aliases import agregar_alias, aliases, cargar_aliases, alias_por_app, eliminar_alias, traducir_alias
 from session import sesion
 import app_finder
-from voz_utils import elegir_de_lista, interpretar_confirmacion
+from voz_utils import elegir_de_lista, interpretar_confirmacion, escuchar_con_reintento
 
 # =========================================================
 # REGISTRAR ALIAS MANUALMENTE
@@ -15,14 +15,14 @@ from voz_utils import elegir_de_lista, interpretar_confirmacion
 # 4. Pedir los alias que se quieren registrar
 # =========================================================
 
+# FIX/NUEVO: escuchar_con_timeout() vivía acá duplicada casi
+# idéntica a la de gestionar_macro.py — se unificaron en
+# escuchar_con_reintento() (voz_utils.py), que de paso agrega
+# soporte para "espera"/"dame un segundo" (ver ese archivo). Se deja
+# este alias con el nombre viejo para no tener que tocar cada
+# llamada de este archivo.
 def escuchar_con_timeout(timeout=8):
-    inicio = time.time()
-    while True:
-        respuesta = escuchar()
-        if respuesta:
-            return respuesta
-        if time.time() - inicio > timeout:
-            return ""
+    return escuchar_con_reintento(timeout=timeout)
 
 
 def buscar_en_cache(nombre):

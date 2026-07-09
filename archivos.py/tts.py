@@ -39,6 +39,23 @@ pygame.mixer.init()
 _lock_voz = threading.Lock()
 
 # =========================================================
+# ÚLTIMO MENSAJE
+# NUEVO: guarda el último texto hablado, para poder repetirlo si el
+# usuario no llegó a escucharlo bien (ej. lo interrumpió el barge-in
+# sin querer, o había ruido de fondo justo en ese momento) — ver
+# ultimo_mensaje() y el comando "repite"/"¿qué dijiste?" en main.py.
+# =========================================================
+
+_ultimo_mensaje = None
+
+
+def ultimo_mensaje():
+    """Devuelve el último texto hablado por el asistente, o None si
+    todavía no habló nada en esta sesión."""
+    return _ultimo_mensaje
+
+
+# =========================================================
 # RESPALDO SIN INTERNET (SAPI5 de Windows)
 # Edge TTS depende de un servicio de Microsoft que de vez en
 # cuando devuelve error 403 (problema conocido y reportado del
@@ -216,6 +233,9 @@ def hablar(texto, permitir_interrupcion=False):
     incertidumbre sin necesidad. Se activa explícitamente solo en
     los mensajes donde más se siente la espera (ver main.py).
     """
+
+    global _ultimo_mensaje
+    _ultimo_mensaje = texto
 
     with _lock_voz:
         print("Asistente:", texto)

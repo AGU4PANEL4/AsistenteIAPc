@@ -154,9 +154,39 @@ ACCIONES_VALIDAS = {
     "crear_recordatorio",
     "listar_recordatorios",
     "cancelar_recordatorio",
+    "crear_recordatorio_recurrente",
     "crear_temporizador",
     "listar_temporizadores",
     "cancelar_temporizador",
+    # FIX/NUEVO: estas se fueron agregando a TOOLS (tools.py) en
+    # distintos momentos, pero nunca se sumaron acá — ACCIONES_VALIDAS
+    # y el prompt de más abajo son la ÚNICA forma en que la IA sabe
+    # qué puede hacer, así que cualquier cosa faltante acá es
+    # invisible para la IA aunque exista en el asistente. En la
+    # práctica esto no se notaba porque todas estas ya tienen sus
+    # propias reglas rápidas en intents.py que las atrapan ANTES de
+    # llegar a la IA — pero si alguna vez se le pide alguna con una
+    # frase que esas reglas no reconocen, la IA fallaba en silencio
+    # ("Intent ignorado") en vez de tener la más mínima chance de
+    # reconocerla. Mantener esto sincronizado con TOOLS (tools.py)
+    # cada vez que se agregue una acción nueva evita que se repita.
+    "crear_macro",
+    "listar_macros",
+    "eliminar_macro",
+    "ejecutar_macro",
+    "activar_no_molestar",
+    "desactivar_no_molestar",
+    "estado_no_molestar",
+    "buscar_actualizacion",
+    "ayuda",
+    # NUEVO: a diferencia de las demás, esta acción NUNCA la calcula
+    # la IA — solo reconoce que es una conversión y reformula la
+    # pregunta a un formato simple. El cálculo real siempre lo hace
+    # conversiones.py con matemática pura (ver conversion_accion en
+    # acciones_sistema.py) — así, aunque la regla rápida de
+    # intents.py no reconozca la frase (por eso llegó hasta acá), la
+    # precisión de la cuenta no depende de que la IA sepa aritmética.
+    "conversion_unidades",
 }
 
 # =========================================================
@@ -365,6 +395,41 @@ cancelar_temporizador → cancel a timer. value is the keyword(s)
                       identifying WHICH timer (its name, e.g. "pasta"),
                       or empty string if the user didn't name one and
                       just said "cancel the timer"
+crear_macro        → start a guided flow to record a new macro (a
+                      saved sequence of actions run with one command).
+                      value is the macro name if the user already
+                      said it, or empty string otherwise
+listar_macros      → list the user's saved macros
+eliminar_macro     → delete a saved macro. value is the macro name if
+                      the user said it, or empty string otherwise
+ejecutar_macro     → run a macro the user already saved by name.
+                      value is that macro's name, in Spanish, as the
+                      user said it (e.g. "modo juego")
+activar_no_molestar → silence reminder/timer announcements for a
+                      while. value is the number of minutes as a
+                      plain integer (e.g. "30" for half an hour,
+                      default to "60" if the user didn't say a
+                      duration)
+desactivar_no_molestar → turn do-not-disturb mode off early
+estado_no_molestar → check whether do-not-disturb mode is on and how
+                      much time is left
+buscar_actualizacion → check right now if there's a new version of
+                      the assistant available
+ayuda              → the user is asking what the assistant can do, or
+                      how to use it (e.g. "what can you do?", "help")
+conversion_unidades → the user is asking to convert a measurement
+                      from one unit to another. Only these units are
+                      supported — milímetros/centímetros/metros/
+                      kilómetros (length), miligramos/gramos/
+                      kilogramos (weight), mililitros/litros
+                      (volume), celsius/fahrenheit (temperature). DO
+                      NOT calculate the answer yourself and DO NOT
+                      use any other unit (no libras, millas, pies,
+                      etc — if the user asks for one of those, reply
+                      "ninguna" instead). value must be the
+                      conversion REPHRASED simply in Spanish as
+                      "<number> <unit> a <unit>", e.g. "5 kilometros
+                      a metros" or "20 celsius a fahrenheit"
 terminar_sesion    → the user is saying goodbye, has nothing else to ask,
                       or wants to end the conversation (in ANY phrasing,
                       not just literal "goodbye" — infer it from intent,
@@ -427,6 +492,24 @@ necesito un cronómetro de 5 minutos para el café → crear_temporizador|5 minu
 cuánto le queda al timer → listar_temporizadores|temporizadores
 cancela el timer → cancelar_temporizador|
 cancela el timer de pasta → cancelar_temporizador|pasta
+crea una macro → crear_macro|
+crea una macro modo juego → crear_macro|modo juego
+qué macros tengo → listar_macros|macros
+elimina la macro modo juego → eliminar_macro|modo juego
+ejecuta modo juego → ejecutar_macro|modo juego
+activa el modo no molestar → activar_no_molestar|60
+no me molestes por 30 minutos → activar_no_molestar|30
+silencio por una hora → activar_no_molestar|60
+desactiva el no molestar → desactivar_no_molestar|
+quítame el no molestar → desactivar_no_molestar|
+está activo el no molestar → estado_no_molestar|
+busca actualizaciones → buscar_actualizacion|
+hay alguna actualización → buscar_actualizacion|
+qué puedes hacer → ayuda|
+ayúdame → ayuda|
+a cuántos metros equivalen 5 kilómetros → conversion_unidades|5 kilometros a metros
+cuántos grados fahrenheit son 30 grados → conversion_unidades|30 celsius a fahrenheit
+transforma 10 mililitros a litros → conversion_unidades|10 mililitros a litros
 no, nada más → terminar_sesion|sesion
 no, gracias → terminar_sesion|sesion
 ya quedé así → terminar_sesion|sesion
@@ -435,6 +518,13 @@ no necesito nada más → terminar_sesion|sesion
 nos vemos → terminar_sesion|sesion
 ya está bien, gracias → terminar_sesion|sesion
 con eso está → terminar_sesion|sesion
+
+Questions and general knowledge are NOT actions — reply "ninguna" for
+those, even if they mention a number or a word that looks like a command:
+cuánto es 47 por 12 → ninguna
+cuál es la capital de Japón → ninguna
+qué hora es → ninguna
+qué es la fotosíntesis → ninguna
 
 If you don't recognize any action reply exactly: ninguna
 
@@ -459,13 +549,25 @@ User: {texto}"""
     return parsear_salida(salida, ultima_app)
 
 # =========================================================
-# CHARLA LIBRE (fallback conversacional)
+# CHARLA LIBRE (fallback conversacional Y preguntas directas)
 # Se usa cuando ni las reglas de intents.py ni la extracción
 # de acciones de arriba encontraron algo ejecutable. En vez de
 # responder siempre "no entendí", el asistente le pide al
 # modelo una respuesta corta y natural, como lo haría alguien
 # real. Esto es lo que lo hace sentir "vivo" en vez de un
 # parser de comandos.
+#
+# NUEVO: esta MISMA función es también el lugar donde caen las
+# preguntas directas ("cuánto es 47 por 12", "cuál es la capital de
+# Japón", "qué es la fotosíntesis") — no hizo falta agregar ningún
+# mecanismo nuevo para "diferenciar pregunta de acción": ninguna
+# pregunta de este tipo matchea ninguna regla de intents.py NI se
+# reconoce como una acción en interpretar_con_ia() de más arriba
+# (ambos le piden a la IA "ninguna" en esos casos), así que TODA
+# pregunta que no sea una acción real termina, sola, exactamente acá
+# — la arquitectura ya hacía esa diferenciación de antes, solo hacía
+# falta que el prompt de acá supiera responder preguntas de verdad en
+# vez de solo saludos.
 # =========================================================
 
 def responder_charla(texto):
@@ -489,13 +591,29 @@ def responder_charla(texto):
     # instrucciones condicionales largas, y hay mucho menos texto
     # "con forma de regla" que el modelo pueda confundir con
     # contenido a repetir.
+    #
+    # NUEVO: se agregaron ejemplos de preguntas directas (cálculo,
+    # capital, fecha, definición corta) junto a los de charla — por
+    # el mismo motivo que el resto del prompt: mostrar con ejemplos
+    # en vez de explicar con reglas. "Respondé DIRECTO" + los
+    # ejemplos evita que el modelo se ponga a explicar el
+    # razonamiento paso a paso (lo cual sonaría larguísimo dicho en
+    # voz alta) — para un asistente de VOZ, "47 por 12 es 564" es lo
+    # que hace falta, no el desarrollo de la cuenta.
     prompt = f"""Eres Jarvis, un asistente de voz que habla español de forma
 natural, como una persona real, no como un narrador.
 
 El texto del usuario viene de un reconocedor de voz que a veces transcribe
 mal — puede llegar como palabras sueltas sin sentido. Si pasa eso, dile
-brevemente que no entendió y que repita. Si el texto sí tiene sentido,
-responde normal, corto y natural.
+brevemente que no entendió y que repita.
+
+Si te hacen una pregunta real (una cuenta, un dato, una fecha, una
+definición corta, algo que quieran saber), respondé la respuesta DIRECTO,
+sin explicar el razonamiento ni dar vueltas — la persona quiere el dato,
+no una clase. Si no sabés la respuesta con certeza, decilo en vez de
+inventar algo.
+
+Si es un saludo o charla informal, respondé normal y natural.
 
 Ejemplos:
 usuario: hola jarvis -> jarvis: hola, ¿en qué te ayudo?
@@ -503,6 +621,11 @@ usuario: ya debes -> jarvis: no te escuché bien, ¿puedes repetir?
 usuario: namas -> jarvis: no entendí eso, dime otra vez
 usuario: gracias -> jarvis: de nada, aquí estoy si necesitas algo más
 usuario: ábrelo -> jarvis: ¿qué app quieres abrir?
+usuario: cuánto es 47 por 12 -> jarvis: 47 por 12 es 564
+usuario: cuánto es 200 dividido 8 -> jarvis: 200 dividido 8 es 25
+usuario: cuál es la capital de Japón -> jarvis: la capital de Japón es Tokio
+usuario: en qué año cayó el muro de Berlín -> jarvis: en 1989
+usuario: qué es la fotosíntesis -> jarvis: es el proceso con el que las plantas convierten luz solar en energía
 
 Responde en máximo 1 o 2 frases cortas, sin listas, sin emojis, sin
 comillas, sin markdown.
@@ -512,11 +635,14 @@ Contexto: la última app que el usuario usó fue "{ultima_app or 'ninguna'}".
 Usuario: {texto}
 Jarvis:"""
 
-    # FIX: temperature=0.6 le daba al modelo bastante libertad creativa
-    # — ayuda a que no suene robótico, pero también es parte de por qué
-    # a veces "se iba por las ramas" inventando interpretaciones
-    # extrañas sobre texto ambiguo. 0.45 mantiene respuestas naturales
-    # y variadas (no es determinístico ni suena repetitivo) pero
-    # reduce la varianza de salidas extrañas en los casos límite.
-    salida = _llamar_ollama(prompt, timeout=10, num_predict=60, temperature=0.45)
+    # NUEVO: temperature bajó de 0.45 a 0.35 — un poco menos de
+    # libertad creativa que antes, a propósito: ahora esta función
+    # también responde cálculos y datos, donde la prioridad es
+    # precisión antes que variedad conversacional. Sigue siendo lo
+    # bastante alto para no sonar robótico en saludos/charla normal.
+    # num_predict subió de 60 a 90 — algunas respuestas factuales
+    # cortas (ej. una definición de una frase) no entraban cómodas en
+    # 60 tokens y se cortaban a mitad de frase; 90 da margen sin
+    # dejar de ser "corto" para una respuesta de voz.
+    salida = _llamar_ollama(prompt, timeout=10, num_predict=90, temperature=0.35)
     return salida or None

@@ -3,31 +3,68 @@ from memory import memoria, guardar_memoria, registrar_accion
 from aliases import *
 from tts import hablar
 from logger import log
+from voz_utils import describir_paso
 
 
 def _ejecutar_pasos(pasos, origen="cadena"):
     """
     Ejecuta una lista de pasos [{intent, valor}, ...] en orden,
-    hablando un resumen al final. Compartido entre cadenas en el
-    momento y macros guardadas — la única diferencia es el texto
-    de logging.
+    SIN que cada paso hable su propio mensaje individual (ver
+    silencioso=True más abajo) — compartido entre cadenas en el
+    momento y macros guardadas, que arman UN solo resumen al final
+    en vez de una confirmación hablada por cada paso.
 
-    Devuelve (exitos, fallos) para que quien llame decida qué decir.
+    FIX/NUEVO: antes cada paso llamaba a ejecutar() normal, que
+    siempre habla su propio mensaje de éxito/error al final. Una
+    cadena de 3-4 acciones ("abre steam y cierra discord y sube el
+    volumen") terminaba hablando 3-4 mensajes seguidos antes de que
+    el usuario pudiera dar el siguiente comando — bastante
+    verborrágico, sobre todo en macros más largas. Ahora cada paso
+    se ejecuta en silencio (silencioso=True) y se arma un solo
+    resumen con describir_paso(), hablado UNA vez al final por quien
+    llama (ver el branch "cadena"/"ejecutar_macro" más abajo).
+
+    Devuelve (exitos, fallos, descripciones_exitosas) para que quien
+    llame arme el resumen final.
     """
     exitos = 0
     fallos = 0
+    descripciones_exitosas = []
 
     for paso in pasos:
-        ok = ejecutar(paso["intent"], paso["valor"])
+        ok = ejecutar(paso["intent"], paso["valor"], silencioso=True)
         if ok:
             exitos += 1
+            descripciones_exitosas.append(describir_paso(paso["intent"], paso["valor"]))
         else:
             fallos += 1
 
-    return exitos, fallos
+    return exitos, fallos, descripciones_exitosas
 
 
-def ejecutar(intent, valor):
+def _resumen_pasos(descripciones, fallos):
+    """
+    Arma UNA frase resumiendo varias acciones ya ejecutadas, en vez
+    de una confirmación por cada una. Ej: "Listo: abrir steam, cerrar
+    discord y subir volumen" (más ", 1 paso fallido" si corresponde).
+    """
+    if not descripciones:
+        return None
+
+    if len(descripciones) == 1:
+        cuerpo = descripciones[0]
+    else:
+        cuerpo = ", ".join(descripciones[:-1]) + " y " + descripciones[-1]
+
+    resumen = f"Listo: {cuerpo}"
+
+    if fallos:
+        resumen += f". {fallos} paso{'s' if fallos > 1 else ''} fallido{'s' if fallos > 1 else ''}"
+
+    return resumen
+
+
+def ejecutar(intent, valor, silencioso=False):
 
     intent     = str(intent).lower().strip()
     valor      = str(valor).strip()
@@ -47,11 +84,19 @@ def ejecutar(intent, valor):
             hablar("No pude entender la secuencia de acciones")
             return False
 
-        exitos, fallos = _ejecutar_pasos(pasos, origen="cadena")
+        exitos, fallos, descripciones = _ejecutar_pasos(pasos, origen="cadena")
 
         if fallos > 0 and exitos == 0:
             hablar("No pude realizar ninguna de las acciones")
             return False
+
+        # FIX/NUEVO: un solo resumen ("Listo: abrir steam, cerrar
+        # discord y subir volumen") en vez de que cada paso hable su
+        # propio mensaje de éxito por separado — ver _resumen_pasos()
+        # y el FIX documentado en _ejecutar_pasos() más arriba.
+        resumen = _resumen_pasos(descripciones, fallos)
+        if resumen:
+            hablar(resumen)
 
         return True
 
@@ -70,14 +115,21 @@ def ejecutar(intent, valor):
             return False
 
         hablar(f"Ejecutando macro {nombre_macro}")
-        exitos, fallos = _ejecutar_pasos(pasos, origen=f"macro:{nombre_macro}")
+        exitos, fallos, descripciones = _ejecutar_pasos(pasos, origen=f"macro:{nombre_macro}")
 
         if fallos > 0 and exitos == 0:
             hablar("La macro no pudo completarse")
             return False
 
-        if fallos > 0:
-            hablar(f"Macro completada con {fallos} paso{'s' if fallos > 1 else ''} fallido{'s' if fallos > 1 else ''}")
+        # FIX/NUEVO: mismo resumen único que en "cadena" — antes, cada
+        # paso de la macro hablaba su propio mensaje de éxito, y ACÁ
+        # ENCIMA se agregaba otro mensaje más ("Macro completada con N
+        # fallidos") — para una macro de 5 pasos eran hasta 6 mensajes
+        # hablados en fila. Ahora es UN resumen con todo lo que se
+        # hizo, más la cuenta de fallidos si los hubo.
+        resumen = _resumen_pasos(descripciones, fallos)
+        if resumen:
+            hablar(resumen)
 
         return True
 
@@ -89,13 +141,14 @@ def ejecutar(intent, valor):
 
     # =====================================================
     # MEMORIA
+    # FIX: memoria["ultima_app"] se movió a la sección de ÉXITO más
+    # abajo — ver el comentario detallado ahí. Acá solo se registra
+    # ultima_accion (usada únicamente como contexto informativo para
+    # la IA de charla en ia.py, donde "qué se intentó" es información
+    # razonable de guardar incluso si la acción termina fallando).
     # =====================================================
 
     memoria["ultima_accion"] = intent
-
-    if intent in ("abrir_app", "cerrar_app", "minimizar_app", "maximizar_app"):
-        memoria["ultima_app"] = nombre_real
-
     guardar_memoria()
 
     # =====================================================
@@ -184,7 +237,7 @@ def ejecutar(intent, valor):
             "crear_temporizador", "listar_temporizadores", "cancelar_temporizador",
             "crear_macro", "listar_macros", "eliminar_macro",
             "activar_no_molestar", "desactivar_no_molestar", "estado_no_molestar",
-            "crear_recordatorio_recurrente",
+            "crear_recordatorio_recurrente", "conversion_unidades",
         )
 
         # FIX: eliminar_alias ahora usa un flujo guiado completo (ver
@@ -199,7 +252,14 @@ def ejecutar(intent, valor):
         # caso SÍ se necesita que executor.py hable el mensaje
         # genérico, o el usuario se quedaría sin ningún aviso. Por eso
         # esta excepción es específica de eliminar_alias, no general.
-        if intent == "eliminar_alias":
+        # FIX/NUEVO: silencioso=True (pasos de cadena/macro, ver
+        # _ejecutar_pasos en executor.py) también suprime el mensaje
+        # de error individual de este paso — el resumen final ya
+        # informa cuántos pasos fallaron, así que hablar ACÁ ADEMÁS el
+        # error específico de cada paso fallido volvía a la misma
+        # verborragia que se quiso evitar (una cadena con 2 pasos
+        # fallidos hablaría 2 errores + el resumen final).
+        if intent == "eliminar_alias" or silencioso:
             pass
         elif intent in intents_con_mensaje_propio and nombre_decir:
             hablar(nombre_decir)
@@ -271,6 +331,10 @@ def ejecutar(intent, valor):
         "activar_no_molestar":    nombre_decir,
         "desactivar_no_molestar": nombre_decir,
         "estado_no_molestar":     nombre_decir,
+        # ayuda
+        "ayuda":                  nombre_decir,
+        # conversión de unidades
+        "conversion_unidades":    nombre_decir,
     }
 
     mensaje = mensajes_exito.get(intent)
@@ -291,6 +355,25 @@ def ejecutar(intent, valor):
     # error, es una decisión válida) pero NO debe registrarse en el
     # historial como si se hubiera creado algo — se distingue por el
     # mensaje específico que devuelve ese caso.
+    # NUEVO: memoria["ultima_app"] SOLO se actualiza acá, ya del lado
+    # de ÉXITO confirmado — no antes de ejecutar como estaba antes.
+    #
+    # FIX: antes se escribía incondicionalmente ANTES de llamar a
+    # TOOLS[intent] (ver la sección MEMORIA más arriba), sin importar
+    # si la acción realmente funcionaba. Eso significaba que "cierra
+    # facebook" con Facebook ya cerrado (la acción FALLA, exito=False,
+    # se retorna antes de llegar acá) igual dejaba
+    # memoria["ultima_app"] = "facebook" — y el siguiente "súbele el
+    # volumen" (sin nombrar app, ver media_volumen_exacto) terminaba
+    # intentando ajustar el volumen de una app que ni siquiera estaba
+    # abierta, en vez de la que realmente sonaba antes. Mismo problema
+    # para "ábrelo"/"ciérralo" (ver intents.py), que también leen este
+    # valor. Ahora coincide con el mismo criterio que ya usaba
+    # registrar_accion() un poco más abajo: solo se cuenta lo que de
+    # verdad pasó.
+    if intent in ("abrir_app", "cerrar_app", "minimizar_app", "maximizar_app"):
+        memoria["ultima_app"] = nombre_real
+
     if intent in ("abrir_app", "cerrar_app"):
         registrar_accion(intent, nombre_real)
     elif intent in ("media_pausar", "media_reanudar", "media_volumen_exacto"):
@@ -302,7 +385,25 @@ def ejecutar(intent, valor):
     elif intent == "crear_temporizador":
         registrar_accion(intent, valor)
 
-    if mensaje:
+    # FIX/NUEVO: antes, guardar_memoria() solo se llamaba UNA vez, al
+    # principio de ejecutar() (antes de siquiera intentar la acción)
+    # — todo lo escrito en memoria DESPUÉS de eso (el historial de
+    # registrar_accion(), y ahora también ultima_app) quedaba solo en
+    # memoria de proceso, sin persistirse a disco hasta la PRÓXIMA vez
+    # que se llamara a ejecutar() (que sí volvía a guardar, de paso,
+    # arrastrando el cambio anterior). En uso normal esto no se nota
+    # (memoria es un dict en memoria compartido durante toda la
+    # sesión), pero si el asistente se cerraba justo después de una
+    # acción, esa última entrada del historial podía perderse. Ahora
+    # se guarda acá también, apenas se sabe el resultado real.
+    guardar_memoria()
+
+    # FIX/NUEVO: silencioso=True (usado por _ejecutar_pasos para
+    # cadenas/macros) suprime SOLO este mensaje hablado — todo lo
+    # demás (memoria, historial, alias) sigue ocurriendo exactamente
+    # igual, así el resumen final de la cadena/macro puede describir
+    # con precisión qué se hizo de verdad.
+    if mensaje and not silencioso:
         hablar(mensaje)
 
     return True

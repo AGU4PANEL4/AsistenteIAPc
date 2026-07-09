@@ -171,10 +171,16 @@ Filename: "{app}\{#MyAppExeName}"; Flags: nowait; Check: WizardSilent
 Filename: "{app}\{#MyAppExeName}"; Parameters: "--desactivar-startup"; Flags: runhidden waituntilterminated; RunOnceId: "DelStartupTask"
 
 ; ============================================================
-[UninstallDelete]
-; Borra los datos de usuario generados durante el uso.
-; Comentar estas líneas si se prefiere conservarlos al desinstalar.
-Type: filesandordirs; Name: "{localappdata}\AsistenteIA"
+; FIX: antes acá había un [UninstallDelete] que borraba TODA
+; %LOCALAPPDATA%\AsistenteIA sin preguntar (config.json con tus
+; API keys de Groq/Spotify, aliases.json, macros.json, memoria.json,
+; recordatorios.json, temporizadores.json, el log — todo). La
+; sección [UninstallDelete] de Inno Setup no tiene forma de
+; condicionar el borrado a una pregunta al usuario, así que se
+; movió a [Code] (ver InitializeUninstall/CurUninstallStepChanged
+; más abajo), que sí puede preguntar primero y decidir según la
+; respuesta.
+; ============================================================
 
 ; ============================================================
 [Code]
@@ -262,4 +268,43 @@ begin
       'La primera vez te pedirá configurar tu API key de Groq' + #13#10 +
       '(gratuita) para activar el modo con internet.';
   end;
+end;
+
+{ ── desinstalación: preguntar antes de borrar datos de usuario ──
+  FIX/NUEVO: antes, [UninstallDelete] borraba SIEMPRE toda
+  %LOCALAPPDATA%\AsistenteIA (config.json con tus API keys, alias,
+  macros, recordatorios, temporizadores, memoria, el log) apenas se
+  desinstalaba, sin ninguna forma de evitarlo desde la interfaz del
+  desinstalador. Eso significa perder todo lo configurado solo por
+  desinstalar (ej. para probar una versión distinta, o reinstalar en
+  otra carpeta) — incluso si la intención era volver a instalar
+  después y seguir donde uno había quedado.
+
+  Ahora se pregunta ANTES de borrar nada, con "No" (conservar) como
+  respuesta por defecto (MB_DEFBUTTON2) — más seguro que borrar por
+  accidente al apretar Enter sin leer. Si el usuario elige "Sí", se
+  borra todo recién en usPostUninstall (después de que el programa
+  en sí ya se desinstaló), nunca antes. }
+
+var
+  BorrarDatosUsuario: Boolean;
+
+function InitializeUninstall(): Boolean;
+begin
+  Result := True;
+
+  BorrarDatosUsuario := MsgBox(
+    'Además de ' + '{#MyAppName}' + ', ¿querés borrar también tus datos ' +
+    'guardados (alias, macros, recordatorios, temporizadores, ' +
+    'configuración y el log)?' + #13#10#13#10 +
+    'Si elegís "No", esos datos quedan intactos por si volvés a ' +
+    'instalar ' + '{#MyAppName}' + ' más adelante.',
+    mbConfirmation, MB_YESNO or MB_DEFBUTTON2
+  ) = IDYES;
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if (CurUninstallStep = usPostUninstall) and BorrarDatosUsuario then
+    DelTree(ExpandConstant('{localappdata}\AsistenteIA'), True, True, True);
 end;
