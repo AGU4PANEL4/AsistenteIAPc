@@ -61,4 +61,20 @@ TOOLS = {
     "ayuda":                ayuda_accion,
     # conversión de unidades
     "conversion_unidades":  conversion_accion,
+    # FIX: estaban importadas arriba (from acciones_sistema import
+    # ..., activar_no_molestar, desactivar_no_molestar,
+    # estado_no_molestar, ...) pero NUNCA se habían agregado acá al
+    # diccionario TOOLS — un bug preexistente del proyecto original,
+    # anterior a cualquier cambio de esta sesión. Aunque intents.py
+    # reconociera perfecto la frase ("no me molestes por una hora",
+    # "activa no molestar", etc.) y devolviera el intent correcto,
+    # executor.py hacía `if intent not in TOOLS: return False` ANTES
+    # de llegar a la sección que habla algún mensaje de error — el
+    # comando fallaba en silencio total, sin ninguna respuesta
+    # hablada, sin ningún indicio de qué salió mal. Por eso "no
+    # molestar" nunca funcionó, sin importar qué tan bien dicha
+    # estuviera la frase.
+    "activar_no_molestar":    activar_no_molestar,
+    "desactivar_no_molestar": desactivar_no_molestar,
+    "estado_no_molestar":     estado_no_molestar,
 }

@@ -3,7 +3,7 @@
 ; ============================================================
 
 #define MyAppName      "AsistenteIA"
-#define MyAppVersion   "1.2.0"
+#define MyAppVersion   "1.2.2"
 #define MyAppPublisher "David"
 #define MyAppExeName   "AsistenteIA.exe"
 #define MyDistDir      "dist\AsistenteIA"

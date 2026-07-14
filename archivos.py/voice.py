@@ -171,6 +171,42 @@ def recalibrar():
 # asistente esperando indefinidamente.
 # =========================================================
 
+# =========================================================
+# PROMPT DE VOCABULARIO PARA GROQ (experimental)
+# NUEVO: hasta ahora, el único "contexto" que se le pasaba a Groq
+# Whisper en comandos reales (ver escuchar() más abajo) eran los
+# hotwords de nombres de apps/juegos — nunca vocabulario de control
+# del asistente ("no molestar", "duérmete", "recuérdame", etc). Casos
+# reales reportados como "molestad" en vez de "molestar" o "duorme
+# te" en vez de "duérmete" son justo ese tipo de error: palabras de
+# COMANDO, no nombres propios, mal transcritas por falta de contexto.
+#
+# A diferencia del initial_prompt que SÍ le llega al Whisper local
+# (ver el FIX/REVERTIDO más abajo, en escuchar_wake_word) — un prompt
+# largo y con vocabulario específico demostró causarle alucinaciones
+# a ese modelo "small" — este prompt viaja SOLO por el parámetro
+# `prompt_groq_extra` de _transcribir(), que nunca llega al Whisper
+# local ni siquiera como respaldo si Groq falla (ver el comentario
+# detallado en _transcribir). Groq usa un modelo bastante más grande
+# (whisper-large-v3-turbo) y no hay evidencia de que tenga el mismo
+# problema, pero tampoco garantía de lo contrario — por eso queda
+# aislado y, además, fácil de apagar con un solo flag si se nota
+# cualquier efecto raro (comandos "completados" hacia estas palabras
+# en vez de lo que realmente se dijo, palabras fantasma, etc): basta
+# con poner PROMPT_GROQ_HABILITADO en False para volver exactamente
+# al comportamiento anterior (solo hotwords de apps/juegos), sin
+# tocar nada más de este archivo.
+# =========================================================
+
+PROMPT_GROQ_HABILITADO = True
+
+PROMPT_GROQ_COMANDOS = (
+    "Comandos de voz en español para un asistente: abrir o cerrar una "
+    "aplicación, pausar, reanudar, subir o bajar el volumen, activar o "
+    "desactivar el modo no molestar, duérmete, despierta, crear un "
+    "recordatorio o un temporizador, cancela."
+)
+
 MODELO_WHISPER = "small"
 
 # FIX: sin especificar cpu_threads, CTranslate2 (el motor que usa
@@ -446,15 +482,32 @@ def _transcribir_con_timeout(audio_data, timeout=None, initial_prompt=None, beam
 _FRASES_FANTASMA_CONOCIDAS = {
     "subtitulos realizados por la comunidad de amara.org",
     "subtitulado por la comunidad de amara.org",
+    "subtitulos por la comunidad de amara.org",
+    "subtitulos en espanol de amara.org",
+    "equipo de subtitulacion",
     "gracias por ver el video",
     "gracias por ver este video",
+    "gracias por ver",
     "suscribete a mi canal",
     "suscribete al canal",
     "dale like y suscribete",
     "no olvides suscribirte",
+    "no olvides darle like",
+    "activa la campanita",
     "mas videos en mi canal",
     "nos vemos en el proximo video",
+    "nos vemos en el siguiente video",
     "www.youtube.com",
+    "sigueme en instagram",
+    "sigueme en redes sociales",
+    # NUEVO: frases con la propia wake word repetida sin sentido, o
+    # solas — otro patrón de alucinación observado en la práctica:
+    # sobre ruido/silencio, el modelo a veces repite palabras que
+    # aparecían en el initial_prompt/hotwords en vez de generar texto
+    # sin relación (ver escuchar_wake_word, que sí sigue pasando
+    # initial_prompt para la wake word en sí).
+    "jarvis jarvis jarvis",
+    "jarvis, jarvis",
 }
 
 
@@ -514,27 +567,42 @@ def _parece_gibberish(texto):
     return not any(c in _VOCALES for c in letras)
 
 
-def _filtrar_resultado(texto):
+def _filtrar_resultado(texto, origen="?"):
     """Punto único por el que pasan los 3 caminos de transcripción
     (Groq, Whisper local, Google) antes de devolver el resultado —
     descarta alucinaciones conocidas y gibberish obvio, convirtiéndolos
     en "" (mismo resultado que "no se escuchó nada", que ya sabe
-    manejar todo el resto del código)."""
+    manejar todo el resto del código).
+
+    NUEVO: registra en el log CADA transcripción real que pasa por
+    acá, se descarte o no — antes solo quedaba rastro de lo que se
+    descartaba, así que diagnosticar un "a veces interpreta mal" o
+    "a veces aparecen palabras raras" dependía por completo de que
+    alguien estuviera mirando la consola en el momento exacto en que
+    pasaba. Ahora, revisando el log
+    (%LOCALAPPDATA%\\AsistenteIA\\asistente.log) después de que algo
+    salió raro, se puede ver EXACTAMENTE qué transcribió cada motor
+    (Groq/Whisper local/Google) en cada intento — mucho más útil para
+    diagnosticar con un caso concreto que una descripción general de
+    "a veces pasa".
+    """
+    log.info(f"Transcripción [{origen}]: {texto!r}")
+
     if _es_frase_fantasma_conocida(texto):
         print(f"[Whisper] Descartada frase fantasma conocida: {texto!r}")
-        log.info(f"Frase fantasma conocida descartada: {texto!r}")
+        log.info(f"  -> descartada (frase fantasma conocida)")
         return ""
 
     if _parece_gibberish(texto):
         print(f"[Whisper] Descartado resultado sin sentido: {texto!r}")
-        log.info(f"Resultado tipo gibberish descartado: {texto!r}")
+        log.info(f"  -> descartada (gibberish)")
         return ""
 
     return texto
 
 
 def _transcribir(audio_data, initial_prompt=None, beam_size=5, hotwords=None,
-                  permitir_groq=True, modelo=None):
+                  permitir_groq=True, modelo=None, prompt_groq_extra=None):
     """
     Transcribe el audio usando el modo híbrido (ver gestor_ia.py):
     con internet se prueba Groq Whisper primero (modelo más grande
@@ -563,6 +631,21 @@ FIX/NUEVO: permitir_groq=False fuerza a NO usar Groq sin importar
     modelo liviano dedicado (ver el comentario junto a su carga, más
     arriba) para reducir el uso de CPU en esa ruta, que corre en loop
     constante.
+
+    `prompt_groq_extra`: texto de contexto que se agrega SOLO cuando
+    la transcripción termina yendo por Groq — a propósito, un
+    parámetro SEPARADO de `initial_prompt` (que si se cae a Whisper
+    local, sí le llega — ver más abajo). NUNCA se pasa a
+    _transcribir_con_timeout()/Whisper local. Esto existe porque un
+    initial_prompt largo con vocabulario específico demostró causar
+    alucinaciones en el Whisper local "small" (ver el FIX/REVERTIDO
+    documentado en escuchar() más abajo) — Groq usa un modelo bastante
+    más grande (whisper-large-v3-turbo) y no hay evidencia de que
+    tenga el mismo problema, pero tampoco garantía de lo contrario,
+    así que se mantiene completamente aislado del camino que sí llega
+    al modelo local, para no arriesgar reintroducir ese bug ya resuelto
+    ahí si algún día Groq falla y esta misma llamada cae de respaldo
+    al Whisper local.
     """
     from gestor_ia import motor_a_usar
 
@@ -591,24 +674,35 @@ FIX/NUEVO: permitir_groq=False fuerza a NO usar Groq sin importar
         # initial_prompt de hotwords como parámetros separados), así
         # que combinarlos en un solo string es la forma correcta de
         # no perder ninguno de los dos.
-        partes_contexto = [p for p in (initial_prompt, hotwords) if p]
+        #
+        # NUEVO: prompt_groq_extra se suma acá también — es el único
+        # lugar del código donde se usa, precisamente porque esta
+        # rama es la única que de verdad habla con Groq.
+        partes_contexto = [p for p in (initial_prompt, prompt_groq_extra, hotwords) if p]
         contexto = ". ".join(partes_contexto) if partes_contexto else None
 
         texto = transcribir_groq(wav_bytes, prompt_contexto=contexto)
 
         if texto is not None:
-            return _filtrar_resultado(texto.lower())
+            return _filtrar_resultado(texto.lower(), origen="groq")
 
         print("[Groq] Transcripción falló, usando Whisper local como respaldo")
         log.warning("Groq Whisper falló, cayendo a Whisper local")
 
+    # NUEVO: a propósito, prompt_groq_extra NO se pasa acá abajo — el
+    # Whisper local ya tiene su propio historial documentado de
+    # alucinar con initial_prompt de vocabulario específico (ver FIX/
+    # REVERTIDO en escuchar()), y este camino es exactamente ese mismo
+    # Whisper local. Si Groq falló y se cae hasta acá, solo initial_
+    # prompt/hotwords (los mismos de siempre) le llegan, tal como
+    # funcionaba antes de este cambio.
     texto = _transcribir_con_timeout(
         audio_data, initial_prompt=initial_prompt, beam_size=beam_size,
         hotwords=hotwords, modelo=modelo
     )
 
     if texto is not None:
-        return _filtrar_resultado(texto.lower())
+        return _filtrar_resultado(texto.lower(), origen="whisper-local")
 
     print("[Whisper] No disponible, usando Google como respaldo")
 
@@ -616,7 +710,7 @@ FIX/NUEVO: permitir_groq=False fuerza a NO usar Groq sin importar
         return _filtrar_resultado(recognizer.recognize_google(
             audio_data,
             language="es-CO"
-        ).lower())
+        ).lower(), origen="google")
     except sr.UnknownValueError:
         return ""
     except sr.RequestError:
@@ -896,7 +990,27 @@ def escuchar():
     # reconocimiento de inmediato, sin reiniciar el asistente.
     hotwords = _construir_hotwords()
 
-    return _transcribir(audio, hotwords=hotwords)
+    # FIX/NUEVO: antes esto no pasaba beam_size, así que caía al
+    # default de _transcribir()/_transcribir_whisper (5). A diferencia
+    # de escuchar_wake_word() (beam_size=1 a propósito, porque corre
+    # en loop constante sobre CUALQUIER audio de fondo — ver el
+    # comentario detallado ahí), esta función se llama UNA sola vez
+    # por comando REAL, ya con una sesión activa — el costo extra de
+    # explorar más hipótesis antes de decidir el texto final se paga
+    # una vez por comando, no continuamente, así que tiene sentido
+    # invertir un poco más de CPU acá a cambio de menos transcripciones
+    # "parecidas pero no exactas" (ej. "molestad" en vez de "molestar",
+    # "duorme te" en vez de "duérmete" — casos reales reportados).
+    # Mismo valor que ya usa escuchar_confirmacion() por el mismo motivo.
+    #
+    # NUEVO: prompt_groq_extra le da a Groq (nunca al Whisper local,
+    # ver PROMPT_GROQ_HABILITADO/_transcribir más arriba) un contexto
+    # de vocabulario de comandos, no solo nombres de apps — apunta
+    # directo a casos como "molestad"/"duorme te" reportados, que son
+    # errores de PALABRAS DE COMANDO, no de nombres propios.
+    prompt_groq = PROMPT_GROQ_COMANDOS if PROMPT_GROQ_HABILITADO else None
+    return _transcribir(audio, beam_size=8, hotwords=hotwords,
+                        prompt_groq_extra=prompt_groq)
 
 # =========================================================
 # ESCUCHAR CON TIMEOUT CORTO

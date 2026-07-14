@@ -29,54 +29,24 @@ _lock = threading.Lock()
 
 # =========================================================
 # ALIASES INICIALES
+# FIX/NUEVO: antes este dict traía una lista de alias predefinidos
+# (osu, phasmophobia, dead by daylight, stellar blade, gta, spider
+# man, wuthering waves, brawlhalla) — específicos de la biblioteca de
+# juegos de una sola persona (la del desarrollo original), sin
+# ninguna relación con lo que tenga instalado cualquier otro usuario
+# nuevo del asistente. Quedaba guardado en el aliases.json de CADA
+# instalación nueva desde el primer arranque (ver cargar_aliases()
+# más abajo), mezclado sin distinción con los alias que la persona
+# fuera creando por su cuenta — ruido de entrada para alguien que ni
+# siquiera tiene esos juegos instalados, y confuso si more adelante
+# quisiera "empezar de cero".
+#
+# Ahora arranca vacío — cualquier instalación nueva empieza sin
+# ningún alias predefinido, y el usuario construye los suyos propios
+# desde el primer "registra un alias" que use.
 # =========================================================
 
-ALIASES_INICIALES = {
-    # osu
-    "osu":             "osu!(lazer)",
-    "oso":             "osu!(lazer)",
-    "osu lazer":       "osu!(lazer)",
-    "oso lazer":       "osu!(lazer)",
-    "os lazer":        "osu!(lazer)",
-    "oz":              "osu!(lazer)",
-
-    # phasmophobia
-    "phasmofobia":     "phasmophobia",
-    "fasmofobia":      "phasmophobia",
-
-    # dead by daylight
-    "dbd":             "dead by daylight",
-    "deadbydaylight":  "dead by daylight",
-
-    # stellar blade
-    "estelar blade":   "stellar blade",
-
-    # gta
-    "gta":                   "grand theft auto v enhanced",
-    "gta 5":                 "grand theft auto v enhanced",
-    "gta cinco":             "grand theft auto v enhanced",
-    "gta v":                 "grand theft auto v enhanced",
-
-    # spider man
-    "spider man":            "marvels spider man remastered",
-    "espider man":           "marvels spider man remastered",
-    "spiderman":             "marvels spider man remastered",
-
-    # wuthering waves
-    "wuthering waves":       "wuthering waves game",
-    "udering waves":         "wuthering waves game",
-    "withering waves":       "wuthering waves game",
-    "utering waves":         "wuthering waves game",
-    "butter in waves":       "wuthering waves game",
-    "uterine waves":         "wuthering waves game",
-
-
-    # brawlhalla
-    "brawl hala":            "brawlhalla",
-    "brawl jala":            "brawlhalla",
-    "bleja":                 "brawlhalla",
-    "brawljala":             "brawlhalla",
-}
+ALIASES_INICIALES = {}
 
 # =========================================================
 # CARGAR

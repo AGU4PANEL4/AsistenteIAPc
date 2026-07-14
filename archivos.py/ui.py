@@ -50,6 +50,13 @@ C = {
     "rojo":       "#ff5566",
     "verde":      "#2de6c0",
     "amarillo":   "#e6c02d",
+    # NUEVO: color propio para el modo dormido — antes usaba los
+    # mismos tonos apagados que "inactivo" (texto_dim/borde2), que es
+    # justo por lo que se confundían a simple vista. Un azul lavanda
+    # suave, con temática de "luz de luna" contra el fondo oscuro,
+    # distinto del resto de la paleta (cian/verde/amarillo/rojo) sin
+    # desentonar con ella.
+    "dormido":    "#8b9ae8",
     "mono":       "Consolas",
     "ui":         "Segoe UI",
 }
@@ -57,6 +64,20 @@ C = {
 # color que se vuelve transparente en la ventana del orbe — no debe
 # coincidir con NINGÚN otro color usado en la interfaz
 TRANSPARENTE = "#ab29fe"
+
+# NUEVO: color de la franja de acento del header (ver _build_header /
+# _tick_header_accent) según el modo actual — mismo lenguaje de color
+# que ya usa el orbe chico en AsistenteUI.ESTADOS, para que la vista
+# expandida "respire" igual que el orbe en vez de sentirse una
+# interfaz aparte.
+COLORES_ACCENT_MODO = {
+    "inactivo":   C["borde"],
+    "escuchando": C["acento"],
+    "procesando": C["amarillo"],
+    "hablando":   C["verde"],
+    "buscando":   C["amarillo"],
+    "dormido":    C["dormido"],
+}
 
 ANCHO       = 300
 ALTO        = 440
@@ -68,6 +89,60 @@ ORBE_RADIO  = 24
 
 MARGEN_DERECHO   = 16
 MARGEN_SUPERIOR  = 40
+
+# NUEVO: duración de la animación de expandir/contraer — ver
+# _animar_geometria() más abajo.
+ANIM_DURACION_MS = 220
+ANIM_PASOS       = 10
+
+
+# =========================================================
+# TOOLTIP
+# NUEVO: ventanita chica sin bordes que aparece junto a un ícono al
+# pasar el mouse, mostrando su nombre — antes los íconos de la
+# sidebar (≡ ⇄ ▤ ◷) eran solo símbolos sin ninguna pista de qué
+# representa cada uno para alguien que los ve por primera vez.
+#
+# Se implementa como un tk.Toplevel propio (no un Label superpuesto)
+# para poder posicionarlo libremente fuera del widget que lo activa,
+# sin alterar el layout de la sidebar. Aparece con un pequeño retraso
+# (ver _on_tab_enter en AsistenteUI) para no destellar en cada barrido
+# rápido del mouse sobre la barra.
+# =========================================================
+
+class _Tooltip:
+    def __init__(self, root):
+        self.root = root
+        self.win  = None
+
+    def show(self, widget, texto):
+        self.hide()
+        try:
+            x = widget.winfo_rootx() + widget.winfo_width() + 6
+            y = widget.winfo_rooty() + widget.winfo_height() // 2 - 10
+        except Exception:
+            return
+
+        win = tk.Toplevel(self.root)
+        win.overrideredirect(True)
+        win.attributes("-topmost", True)
+        win.configure(bg=C["borde"])
+
+        tk.Label(
+            win, text=texto, font=(C["ui"], 8),
+            fg=C["texto"], bg=C["bg2"], padx=8, pady=3,
+        ).pack(padx=1, pady=1)
+
+        win.geometry(f"+{x}+{y}")
+        self.win = win
+
+    def hide(self):
+        if self.win is not None:
+            try:
+                self.win.destroy()
+            except Exception:
+                pass
+            self.win = None
 
 
 # =========================================================
@@ -83,11 +158,14 @@ class AsistenteUI:
         "hablando":   {"txt": "Hablando...",             "color": C["verde"],     "dot": C["verde"]},
         "buscando":   {"txt": "Buscando app...",         "color": C["amarillo"],  "dot": C["amarillo"]},
         # NUEVO: modo dormido (ver es_dormir en session.py / main.py) —
-        # mismos tonos apagados que "inactivo" (texto_dim/borde2), a
-        # propósito: visualmente debe sentirse tan "en reposo" como
-        # inactivo, solo que el texto aclara que hace falta la palabra
-        # de despertar en vez de la wake word normal.
-        "dormido":    {"txt": 'Durmiendo — di "despierta"', "color": C["texto_dim"], "dot": C["borde2"]},
+        # FIX: antes usaba los mismos tonos apagados que "inactivo"
+        # (texto_dim/borde2) a propósito para que se sintiera "en
+        # reposo" — pero terminó siendo el problema: se confundía a
+        # simple vista con inactivo. Ahora usa su propio color
+        # (C["dormido"], un azul lavanda) — sigue siendo un tono
+        # tranquilo/apagado, no tan vivo como el cian de "escuchando",
+        # pero claramente distinguible de "inactivo" de un vistazo.
+        "dormido":    {"txt": 'Durmiendo — di "despierta"', "color": C["dormido"], "dot": C["dormido"]},
     }
 
     def __init__(self, root):
@@ -97,6 +175,25 @@ class AsistenteUI:
         self._pulse     = 0.0
         self._drag_x    = self._drag_y = 0
         self._movido    = False
+
+        # NUEVO: tooltip compartido de la sidebar, ícono bajo el
+        # mouse en este momento (o None), e ids de los after()
+        # pendientes que muestran el tooltip con retraso — ver
+        # _on_tab_enter/_on_tab_leave.
+        self._tooltip            = _Tooltip(root)
+        self._tab_hover           = None
+        self._tooltip_after_ids   = {}
+
+        # NUEVO: contador de vueltas de _polling — los badges de
+        # conteo (aliases/macros/recordatorios) se recalculan cada
+        # cierta cantidad de vueltas en vez de en cada tick, para no
+        # relistar esos datos 16 veces por segundo sin necesidad.
+        self._sidebar_tick_contador = 0
+
+        # NUEVO: animación en curso al expandir/contraer — evita que
+        # dos animaciones se pisen si el usuario hace doble clic
+        # rápido durante la transición.
+        self._animando = False
 
         # esquina superior derecha que ancla la ventana, sin importar
         # si está en modo orbe o modo panel — se actualiza cada vez
@@ -224,20 +321,38 @@ class AsistenteUI:
             # (×0.12) a propósito — una "respiración" pausada en vez
             # del ritmo normal de las otras animaciones, para que se
             # sienta como algo que duerme, no como que está ocupado.
-            # La forma es una luna creciente simple: un círculo con
-            # otro círculo del color de fondo superpuesto encima,
-            # desplazado — la misma técnica que ya usa self.orb_circulo
-            # (pintar con C["bg2"] para "recortar" contra la base).
+            #
+            # FIX/NUEVO: la primera versión solo variaba 2px el radio
+            # de la luna — muy sutil, seguía pareciéndose a "inactivo"
+            # de reojo. Ahora hay un HALO de verdad: varios círculos
+            # concéntricos rellenos (Tkinter no soporta transparencia
+            # real ni blur, así que un degradado radial se simula
+            # pintando círculos cada vez más chicos y brillantes por
+            # ENCIMA de los más grandes y tenues) cuyo brillo GENERAL
+            # sube y baja con la respiración — se nota incluso mirando
+            # de reojo, no solo mirando fijo la luna.
             fase_lenta  = self._orb_fase * 0.12
             respiracion = (math.sin(fase_lenta) + 1) / 2  # 0..1 suave
-            radio_luna  = 9 + 2 * respiracion
-            tono        = _mezclar_hex(color, C["bg2"], 0.45 + 0.55 * respiracion)
 
             cx, cy = ORBE_CENTRO, ORBE_CENTRO
+
+            for radio_base, intensidad_base in ((20, 0.14), (16, 0.22), (12, 0.32)):
+                radio      = radio_base + respiracion * 2
+                intensidad = intensidad_base * (0.35 + 0.65 * respiracion)
+                tono       = _mezclar_hex(color, C["bg2"], intensidad)
+                cv.create_oval(
+                    cx - radio, cy - radio, cx + radio, cy + radio,
+                    fill=tono, outline="", tags="anim",
+                )
+
+            # luna creciente encima del halo — mismo color dedicado,
+            # ya no el tono apagado que compartía con "inactivo"
+            radio_luna = 9 + 1.5 * respiracion
+            tono_luna  = _mezclar_hex(color, C["bg2"], 0.55 + 0.45 * respiracion)
             cv.create_oval(
                 cx - radio_luna, cy - radio_luna,
                 cx + radio_luna, cy + radio_luna,
-                fill=tono, outline="", tags="anim",
+                fill=tono_luna, outline="", tags="anim",
             )
             desplazo = radio_luna * 0.55
             cv.create_oval(
@@ -259,23 +374,33 @@ class AsistenteUI:
         # otro modo (ej. escuchando un comando con no molestar de
         # fondo) — por eso se dibuja acá, DESPUÉS y ENCIMA de
         # cualquier animación de arriba, en vez de ser un "modo" más.
-        # Un círculo con una línea diagonal (símbolo universal de
-        # "silenciado"), quieto — a propósito sin animación, para no
-        # competir visualmente con la animación del modo actual, y
-        # en rojo (C["rojo"]) para que se note incluso a simple
-        # vistazo, en una esquina del orbe.
+        #
+        # FIX/NUEVO: rediseñado — antes era un círculo con contorno y
+        # una línea DIAGONAL cruzándolo (símbolo genérico de
+        # "silenciado/prohibido"). Ahora es un círculo RELLENO con una
+        # línea HORIZONTAL de puntas redondeadas en el medio — el
+        # ícono clásico de "No molestar" de iOS/macOS, mucho más
+        # reconocible a primera vista para ese significado específico
+        # (silenciado diagonal se confunde fácil con "prohibido/
+        # bloqueado" en general). capstyle="round" es lo que redondea
+        # las puntas de la línea en vez de dejarlas cuadradas.
+        #
+        # Sigue quieto, a propósito, sin animación — no debe competir
+        # visualmente con la animación del modo actual, y en rojo
+        # (C["rojo"]) para que se note incluso a simple vistazo, en
+        # una esquina del orbe.
         # =====================================================
 
         if no_molestar_activo:
-            bx, by, br = ORBE_CENTRO + ORBE_RADIO - 6, ORBE_CENTRO - ORBE_RADIO + 6, 7
+            bx, by, br = ORBE_CENTRO + ORBE_RADIO - 7, ORBE_CENTRO - ORBE_RADIO + 7, 8
             cv.create_oval(
                 bx - br, by - br, bx + br, by + br,
-                fill=C["bg"], outline=C["rojo"], width=2, tags="anim",
+                fill=C["rojo"], outline=C["bg"], width=2, tags="anim",
             )
-            d = br * 0.7
+            mitad_linea = br * 0.55
             cv.create_line(
-                bx - d, by - d, bx + d, by + d,
-                fill=C["rojo"], width=2, tags="anim",
+                bx - mitad_linea, by, bx + mitad_linea, by,
+                fill=C["bg"], width=3, capstyle="round", tags="anim",
             )
 
     # ── panel expandido ───────────────────────────────────
@@ -287,28 +412,129 @@ class AsistenteUI:
         self._build_body(self.panel_frame)
         self._build_footer(self.panel_frame)
 
+        # NUEVO: rectángulo liso, sin hijos, usado SOLO mientras dura
+        # la animación de expandir/contraer (ver _expandir/_colapsar).
+        #
+        # FIX: la primera versión de la animación mantenía el panel
+        # COMPLETO (con sidebar, listas, botones) visible durante todo
+        # el resize — pero Tkinter no reacomoda ni "escala" el
+        # contenido en cada frame intermedio, así que a mitad de la
+        # animación se veía el panel recortado de forma abrupta por
+        # el borde de la ventana (texto cortado a la mitad, sidebar
+        # aplastada), en vez de una transición prolija. Esto es lo
+        # que se sentía "raro" en la animación.
+        #
+        # Ahora, mientras el tamaño cambia, se muestra este rectángulo
+        # sin contenido (mismo color de fondo) — al no tener hijos que
+        # reacomodar, se ve como un simple crecimiento/achique de un
+        # bloque de color sólido, sin nada que recortar. El panel real
+        # (o el orbe) recién se muestra de un swap instantáneo cuando
+        # la animación ya terminó del todo.
+        self.placeholder_frame = tk.Frame(self.root, bg=C["bg"])
+
+    # ── transición animada entre orbe y panel ─────────────
+    # NUEVO: antes _expandir()/_colapsar() ponían el tamaño final de
+    # la ventana de un solo golpe con root.geometry(...) — un cambio
+    # brusco e instantáneo. Ahora se interpola el ancho/alto en
+    # varios pasos cortos (con ease-out, más rápido al empezar y
+    # suave al llegar) durante ANIM_DURACION_MS — la esquina superior
+    # derecha (self._anchor_x_right/_anchor_y_top) se mantiene fija
+    # como referencia, así la ventana crece/achica "desde" esa
+    # esquina en vez de desde el centro.
+
+    def _animar_geometria(self, ancho_ini, alto_ini, ancho_fin, alto_fin,
+                          al_terminar=None):
+        self._animando = True
+
+        def _ease_out(t):
+            return 1 - (1 - t) ** 3
+
+        def _paso(i):
+            t     = _ease_out(i / ANIM_PASOS)
+            ancho = int(ancho_ini + (ancho_fin - ancho_ini) * t)
+            alto  = int(alto_ini + (alto_fin - alto_ini) * t)
+            x     = self._anchor_x_right - ancho
+            y     = self._anchor_y_top
+            try:
+                self.root.geometry(f"{ancho}x{alto}+{x}+{y}")
+            except Exception:
+                pass
+
+            if i < ANIM_PASOS:
+                self.root.after(ANIM_DURACION_MS // ANIM_PASOS, lambda: _paso(i + 1))
+            else:
+                self._animando = False
+                if al_terminar:
+                    al_terminar()
+
+        _paso(0)
+
     def _expandir(self):
+        if self._animando:
+            return
         self._anchor_desde_geometria()
+
+        # swap instantáneo: orbe fuera, placeholder liso adentro — el
+        # panel real (con todo su contenido) recién se muestra cuando
+        # la animación de tamaño ya terminó (ver _al_terminar).
         self.orb_canvas.pack_forget()
-        x = self._anchor_x_right - ANCHO
-        y = self._anchor_y_top
-        self.root.geometry(f"{ANCHO}x{ALTO}+{x}+{y}")
-        self.panel_frame.pack(fill="both", expand=True)
+        self.placeholder_frame.pack(fill="both", expand=True)
         self.expandido = True
 
+        def _al_terminar():
+            self.placeholder_frame.pack_forget()
+            self.panel_frame.pack(fill="both", expand=True)
+
+        self._animar_geometria(ORBE_CANVAS, ORBE_CANVAS, ANCHO, ALTO,
+                               al_terminar=_al_terminar)
+
     def _colapsar(self, inicial=False):
-        if not inicial:
-            self._anchor_desde_geometria()
-        self.panel_frame.pack_forget()
-        x = self._anchor_x_right - ORBE_CANVAS
-        y = self._anchor_y_top
-        self.root.geometry(f"{ORBE_CANVAS}x{ORBE_CANVAS}+{x}+{y}")
-        self.orb_canvas.pack(fill="both", expand=True)
+        if inicial:
+            # sin animación al arrancar — no hay nada que "contraer"
+            # todavía, la ventana nunca estuvo expandida antes de esto
+            self.panel_frame.pack_forget()
+            self.placeholder_frame.pack_forget()
+            x = self._anchor_x_right - ORBE_CANVAS
+            y = self._anchor_y_top
+            self.root.geometry(f"{ORBE_CANVAS}x{ORBE_CANVAS}+{x}+{y}")
+            self.orb_canvas.pack(fill="both", expand=True)
+            self.expandido = False
+            return
+
+        if self._animando:
+            return
+
+        self._anchor_desde_geometria()
         self.expandido = False
+
+        # swap instantáneo: panel real fuera, placeholder liso adentro
+        # — se oculta el contenido completo ANTES de que la ventana
+        # empiece a achicarse, así nunca se ve recortado a mitad de
+        # camino.
+        self.panel_frame.pack_forget()
+        self.placeholder_frame.pack(fill="both", expand=True)
+
+        def _al_terminar():
+            self.placeholder_frame.pack_forget()
+            self.orb_canvas.pack(fill="both", expand=True)
+
+        self._animar_geometria(ANCHO, ALTO, ORBE_CANVAS, ORBE_CANVAS,
+                               al_terminar=_al_terminar)
 
     # ── header ──────────────────────────────────────────
 
     def _build_header(self, parent):
+        # NUEVO: barrita de acento arriba del todo del header, que
+        # cambia de color según el modo actual (cian escuchando,
+        # amarillo procesando, verde hablando, lavanda dormido) —
+        # ver _tick_header_accent(). Con no molestar activo, el rojo
+        # tiene prioridad sobre cualquier modo, para que se note
+        # incluso mirando de reojo el panel expandido, con el mismo
+        # lenguaje visual que ya usa el orbe chico (ver
+        # _dibujar_orbe, indicador de no molestar).
+        self.header_accent = tk.Frame(parent, bg=C["borde"], height=3)
+        self.header_accent.pack(fill="x")
+
         h = tk.Frame(parent, bg=C["bg2"], height=44)
         h.pack(fill="x")
         h.pack_propagate(False)
@@ -436,39 +662,128 @@ class AsistenteUI:
         ]
         self._tab_frames[0].pack(fill="both", expand=True)
 
+    ALTURA_ITEM_SIDEBAR = 42
+
     def _build_sidebar(self, parent):
         self._tab_names  = ["Historial", "Aliases", "Macros", "Recordatorios"]
         self._tab_iconos = ["≡", "⇄", "▤", "◷"]
         self._tab_active = 0
-        self._tab_btns   = []
+        self._tab_btns   = []   # Canvas por cada ítem, uno por pestaña
 
         bar = tk.Frame(parent, bg=C["bg3"], width=SIDEBAR_W)
         bar.pack(side="left", fill="y")
         bar.pack_propagate(False)
 
         for i, icono in enumerate(self._tab_iconos):
-            b = tk.Label(bar, text=icono, font=(C["ui"], 13),
-                         fg=C["texto_dim"], bg=C["bg3"],
-                         cursor="hand2", pady=10)
-            b.pack(side="top", fill="x")
-            b.bind("<Button-1>", lambda e, idx=i: self._switch_tab(idx))
-            b.bind("<Enter>", lambda e, btn=b, idx=i: (
-                btn.config(fg=C["texto"]) if idx != self._tab_active else None
-            ))
-            b.bind("<Leave>", lambda e, btn=b, idx=i: (
-                btn.config(fg=C["texto_dim"]) if idx != self._tab_active else None
-            ))
-            self._tab_btns.append(b)
+            cv = tk.Canvas(
+                bar, width=SIDEBAR_W, height=self.ALTURA_ITEM_SIDEBAR,
+                bg=C["bg3"], highlightthickness=0, cursor="hand2",
+            )
+            cv.pack(side="top", fill="x")
+
+            cv.bind("<Button-1>", lambda e, idx=i: self._switch_tab(idx))
+            cv.bind("<Enter>", lambda e, idx=i, w=cv: self._on_tab_enter(idx, w))
+            cv.bind("<Leave>", lambda e, idx=i: self._on_tab_leave(idx))
+
+            self._tab_btns.append(cv)
 
         self._switch_tab(0)
 
+    # ── contadores de la sidebar ──────────────────────────
+    # NUEVO: numerito chico sobre cada ícono con cuántos elementos
+    # hay guardados (aliases, macros, recordatorios activos) — da
+    # información útil de un vistazo, sin tener que entrar a la
+    # pestaña para saber si hay algo o no. Historial no tiene
+    # contador propio (no es algo que se "acumule" de forma útil de
+    # ver de reojo, a diferencia de los otros tres).
+
+    def _contar_para_tab(self, idx):
+        # NOTA: Aliases (idx==1) a propósito NO tiene badge — a
+        # diferencia de macros/recordatorios (donde saber "cuántos
+        # tengo activos" de un vistazo es útil), la cantidad de alias
+        # guardados no aporta la misma información accionable, y un
+        # numerito ahí todo el tiempo termina siendo ruido visual
+        # sin utilidad real.
+        try:
+            if idx == 2:
+                from macros import listar_macros
+                return len(listar_macros())
+            if idx == 3:
+                from recordatorios import listar_recordatorios
+                return len(listar_recordatorios())
+        except Exception:
+            pass
+        return 0
+
+    def _redibujar_sidebar(self):
+        """Redibuja los 4 íconos de la sidebar: ícono, barra
+        indicadora de pestaña activa, y badge de conteo."""
+        for i, cv in enumerate(self._tab_btns):
+            cv.delete("all")
+
+            activo = (i == self._tab_active)
+            hover  = (i == self._tab_hover)
+            w, h   = SIDEBAR_W, self.ALTURA_ITEM_SIDEBAR
+
+            cv.config(bg=C["bg"] if activo else C["bg3"])
+
+            # NUEVO: barrita de color a la izquierda del ícono activo
+            # — antes la única señal de "cuál pestaña estás viendo"
+            # era el color del texto del ícono, sutil y fácil de
+            # pasar por alto de un vistazo rápido.
+            if activo:
+                cv.create_rectangle(0, 6, 3, h - 6, fill=C["acento"], outline="")
+
+            if activo:
+                color_icono = C["acento"]
+            elif hover:
+                color_icono = C["texto"]
+            else:
+                color_icono = C["texto_dim"]
+
+            cv.create_text(w // 2 + 2, h // 2, text=self._tab_iconos[i],
+                           fill=color_icono, font=(C["ui"], 13))
+
+            conteo = self._contar_para_tab(i)
+            if conteo > 0:
+                bx, by = w - 9, 9
+                r      = 7 if conteo < 10 else 9
+                cv.create_oval(bx - r, by - r, bx + r, by + r,
+                               fill=C["rojo"], outline=cv["bg"], width=1)
+                texto_conteo = str(conteo) if conteo < 100 else "99+"
+                cv.create_text(bx, by, text=texto_conteo,
+                               fill="#ffffff", font=(C["ui"], 7, "bold"))
+
+    # ── tooltips de la sidebar ────────────────────────────
+
+    def _on_tab_enter(self, idx, widget):
+        self._tab_hover = idx
+        self._redibujar_sidebar()
+
+        # se muestra con un pequeño retraso, no al instante, para
+        # que un barrido rápido del mouse sobre la barra no haga
+        # destellar varios tooltips seguidos
+        self._tooltip_after_ids[idx] = self.root.after(
+            450, lambda: self._tooltip.show(widget, self._tab_names[idx])
+        )
+
+    def _on_tab_leave(self, idx):
+        if self._tab_hover == idx:
+            self._tab_hover = None
+            self._redibujar_sidebar()
+
+        pendiente = self._tooltip_after_ids.pop(idx, None)
+        if pendiente is not None:
+            try:
+                self.root.after_cancel(pendiente)
+            except Exception:
+                pass
+
+        self._tooltip.hide()
+
     def _switch_tab(self, idx):
         self._tab_active = idx
-        for i, b in enumerate(self._tab_btns):
-            if i == idx:
-                b.config(fg=C["acento"], bg=C["bg"])
-            else:
-                b.config(fg=C["texto_dim"], bg=C["bg3"])
+        self._redibujar_sidebar()
 
         if hasattr(self, "_tab_frames"):
             for i, f in enumerate(self._tab_frames):
@@ -483,6 +798,35 @@ class AsistenteUI:
                 self._recargar_macros()
             elif idx == 3:
                 self._recargar_recs()
+    # ── mensaje de estado vacío (envuelve texto largo) ───
+    # FIX/NUEVO: los mensajes de "todavía no hay X — decí Y para
+    # crear uno" se insertaban antes como filas normales del Listbox
+    # — pero un Listbox NO envuelve texto (no hace salto de línea):
+    # en esta ventana angosta (300px, menos la sidebar), un mensaje
+    # de más de ~35 caracteres quedaba cortado a la mitad sin ningún
+    # aviso, ilegible.
+    #
+    # Ahora se muestra en un Label aparte, superpuesto con place()
+    # sobre el Listbox (vacío en ese momento), con wraplength —
+    # Tkinter parte el texto en tantas líneas como haga falta para
+    # que quepa en el ancho disponible, sin importar cuán largo sea
+    # el mensaje ni tener que adivinar cuántos caracteres entran.
+
+    def _crear_label_vacio(self, parent):
+        return tk.Label(
+            parent, text="", font=(C["ui"], 9),
+            fg=C["texto_dim"], bg=C["bg"], justify="center",
+            wraplength=ANCHO - SIDEBAR_W - 36,
+        )
+
+    def _mostrar_vacio(self, listbox, label_vacio, mensaje):
+        listbox.delete(0, tk.END)
+        label_vacio.config(text=mensaje)
+        label_vacio.place(relx=0.5, rely=0.38, anchor="center",
+                          width=ANCHO - SIDEBAR_W - 24)
+
+    def _ocultar_vacio(self, label_vacio):
+        label_vacio.place_forget()
 # ── historial ───────────────────────────────────────
 
     def _tab_historial(self, parent):
@@ -502,17 +846,21 @@ class AsistenteUI:
         self.hist_list.configure(yscrollcommand=sb.set)
         sb.pack(side="right", fill="y", pady=6)
         self.hist_list.pack(fill="both", expand=True, padx=10, pady=6)
+        self.hist_vacio = self._crear_label_vacio(f)
         return f
 
     def _actualizar_historial(self):
         try:
             from ui_estado import get_historial
             items = get_historial()
-            self.hist_list.delete(0, tk.END)
             if not items:
-                self.hist_list.insert(tk.END, "  (sin comandos aún)")
-                self.hist_list.itemconfig(tk.END, fg=C["borde2"])
+                self._mostrar_vacio(
+                    self.hist_list, self.hist_vacio,
+                    'Todavía no hay comandos.\nDecí "jarvis" para empezar.'
+                )
                 return
+            self._ocultar_vacio(self.hist_vacio)
+            self.hist_list.delete(0, tk.END)
             for item in items:
                 ts   = item.get("ts", "")
                 cmd  = item.get("cmd", "")
@@ -546,6 +894,7 @@ class AsistenteUI:
         self.alias_list.configure(yscrollcommand=sb.set)
         sb.pack(side="right", fill="y", pady=6)
         self.alias_list.pack(fill="both", expand=True, padx=10, pady=6)
+        self.alias_vacio = self._crear_label_vacio(f)
 
         self._build_action_bar(f,
                                [("↺ Recargar", self._recargar_aliases),
@@ -556,6 +905,13 @@ class AsistenteUI:
         try:
             from aliases import listar_aliases
             data = listar_aliases()
+            if not data:
+                self._mostrar_vacio(
+                    self.alias_list, self.alias_vacio,
+                    'Todavía no creaste ningún alias.\nDecí "registra un alias" para empezar.'
+                )
+                return
+            self._ocultar_vacio(self.alias_vacio)
             self.alias_list.delete(0, tk.END)
             for alias, real in sorted(data.items()):
                 self.alias_list.insert(tk.END, f"  ⇀  {alias}")
@@ -565,6 +921,7 @@ class AsistenteUI:
                 self.alias_list.insert(tk.END, "")
                 self.alias_list.itemconfig(tk.END, fg=C["bg"])
         except Exception as e:
+            self._ocultar_vacio(self.alias_vacio)
             self.alias_list.delete(0, tk.END)
             self.alias_list.insert(tk.END, f"Error: {e}")
 
@@ -604,6 +961,7 @@ class AsistenteUI:
         self.macro_list.configure(yscrollcommand=sb.set)
         sb.pack(side="right", fill="y", pady=6)
         self.macro_list.pack(fill="both", expand=True, padx=10, pady=6)
+        self.macro_vacio = self._crear_label_vacio(f)
 
         self._build_action_bar(f,
                                [("↺ Recargar", self._recargar_macros),
@@ -614,11 +972,14 @@ class AsistenteUI:
         try:
             from macros import listar_macros
             data = listar_macros()
-            self.macro_list.delete(0, tk.END)
             if not data:
-                self.macro_list.insert(tk.END, "  (sin macros guardadas)")
-                self.macro_list.itemconfig(tk.END, fg=C["borde2"])
+                self._mostrar_vacio(
+                    self.macro_list, self.macro_vacio,
+                    'Todavía no creaste ninguna macro.\nDecí "crea una macro" para empezar.'
+                )
                 return
+            self._ocultar_vacio(self.macro_vacio)
+            self.macro_list.delete(0, tk.END)
             for nombre, pasos in sorted(data.items()):
                 self.macro_list.insert(tk.END, f"  ▷  {nombre}")
                 self.macro_list.itemconfig(tk.END, fg=C["acento_dim"])
@@ -627,6 +988,7 @@ class AsistenteUI:
                 self.macro_list.insert(tk.END, "")
                 self.macro_list.itemconfig(tk.END, fg=C["bg"])
         except Exception as e:
+            self._ocultar_vacio(self.macro_vacio)
             self.macro_list.delete(0, tk.END)
             self.macro_list.insert(tk.END, f"Error: {e}")
 
@@ -666,6 +1028,7 @@ class AsistenteUI:
         self.rec_list.configure(yscrollcommand=sb.set)
         sb.pack(side="right", fill="y", pady=6)
         self.rec_list.pack(fill="both", expand=True, padx=10, pady=6)
+        self.rec_vacio = self._crear_label_vacio(f)
 
         self._rec_ids = []
 
@@ -678,12 +1041,15 @@ class AsistenteUI:
         try:
             from recordatorios import listar_recordatorios_ordenados
             items = listar_recordatorios_ordenados()
-            self.rec_list.delete(0, tk.END)
             self._rec_ids = []
             if not items:
-                self.rec_list.insert(tk.END, "  (sin recordatorios)")
-                self.rec_list.itemconfig(tk.END, fg=C["borde2"])
+                self._mostrar_vacio(
+                    self.rec_list, self.rec_vacio,
+                    'Todavía no tenés recordatorios.\nDecí "recuérdame..." para crear uno.'
+                )
                 return
+            self._ocultar_vacio(self.rec_vacio)
+            self.rec_list.delete(0, tk.END)
             for id_str, info in items:
                 try:
                     desde = datetime.fromisoformat(info["momento"])
@@ -701,6 +1067,7 @@ class AsistenteUI:
                 self.rec_list.itemconfig(tk.END, fg=C["bg"])
                 self._rec_ids.append(id_str)
         except Exception as e:
+            self._ocultar_vacio(self.rec_vacio)
             self.rec_list.delete(0, tk.END)
             self.rec_list.insert(tk.END, f"Error: {e}")
             self._rec_ids = []
@@ -774,8 +1141,19 @@ class AsistenteUI:
             self._tick_orbe()
             if self.expandido:
                 self._tick_dot_header()
+                self._tick_header_accent()
                 if self._tab_active == 0:
                     self._actualizar_historial()
+
+                # NUEVO: los badges de conteo de la sidebar (aliases/
+                # macros/recordatorios) se recalculan cada ~20 vueltas
+                # de polling (~1.2s con el intervalo de 60ms de abajo)
+                # en vez de en cada tick — son datos que cambian poco
+                # de un momento a otro, así que no hace falta
+                # relistarlos 16 veces por segundo.
+                self._sidebar_tick_contador += 1
+                if self._sidebar_tick_contador % 20 == 0:
+                    self._redibujar_sidebar()
         except Exception:
             pass
         self.root.after(60, self._polling)
@@ -804,6 +1182,23 @@ class AsistenteUI:
             }
             fd = fd_colors.get(modo, C["borde2"])
             self.cv_fdot.itemconfig(self.fdot_id, fill=fd)
+        except Exception:
+            pass
+
+    def _tick_header_accent(self):
+        """
+        Actualiza el color de la franja superior del header según el
+        modo actual — no molestar tiene prioridad sobre cualquier
+        modo (rojo), igual que en el orbe chico (ver _dibujar_orbe).
+        """
+        try:
+            from ui_estado import get_estado
+            estado      = get_estado()
+            modo        = estado.get("modo", "inactivo")
+            no_molestar = estado.get("no_molestar", False)
+
+            color = C["rojo"] if no_molestar else COLORES_ACCENT_MODO.get(modo, C["borde"])
+            self.header_accent.config(bg=color)
         except Exception:
             pass
 

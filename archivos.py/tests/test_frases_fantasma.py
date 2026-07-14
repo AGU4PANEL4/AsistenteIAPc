@@ -127,3 +127,32 @@ def test_filtrar_resultado_no_descarta_numeros():
     # perderse por no tener vocales -- los dígitos son un caso
     # especial permitido a propósito
     assert voice._filtrar_resultado("50") == "50"
+
+
+def test_comandos_con_musica_no_se_descartan():
+    """
+    FIX: la lista de frases fantasma en algún momento tuvo
+    "musica"/"aplausos"/"risas" como palabras SUELTAS — pero el
+    filtro compara por substring, así que "pon música" se hubiera
+    descartado por completo (contiene "musica" como substring),
+    rompiendo un comando real de control de medios. Se sacaron esas
+    entradas de la lista; solo quedan frases largas y distintivas
+    que nadie diría como comando real.
+    """
+    for texto in ["pon musica", "sube el volumen de la musica", "reproduce musica relajante"]:
+        assert voice._filtrar_resultado(texto) == texto
+
+
+def test_filtrar_resultado_registra_todo_en_el_log(monkeypatch):
+    """NUEVO: _filtrar_resultado ahora registra CADA transcripción
+    (válida o descartada) en el log, con el motor que la generó —
+    para poder diagnosticar con datos concretos en vez de a ciegas."""
+    logs = []
+    monkeypatch.setattr(voice.log, "info", lambda msg: logs.append(msg))
+
+    voice._filtrar_resultado("abre discord", origen="groq")
+    voice._filtrar_resultado("suscribete a mi canal", origen="whisper-local")
+
+    assert any("abre discord" in l and "groq" in l for l in logs)
+    assert any("suscribete a mi canal" in l and "whisper-local" in l for l in logs)
+    assert any("descartada" in l for l in logs)

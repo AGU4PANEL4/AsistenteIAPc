@@ -1,3 +1,5 @@
+from voz_utils import frase_coincide_difuso
+
 sesion = {
     "activa":    False,
     "cancelar":  False,  # se pone True cuando el usuario dice la palabra de cancelación
@@ -96,7 +98,7 @@ def es_despedida(texto):
     if not texto:
         return False
     texto = _quitar_fillers(texto.lower().strip())
-    return texto in FRASES_DESPEDIDA
+    return frase_coincide_difuso(texto, FRASES_DESPEDIDA)
 
 # =========================================================
 # REPETIR ÚLTIMO MENSAJE
@@ -146,4 +148,4 @@ def es_dormir(texto):
     if not texto:
         return False
     texto = _quitar_fillers(texto.lower().strip())
-    return texto in FRASES_DORMIR
+    return frase_coincide_difuso(texto, FRASES_DORMIR)

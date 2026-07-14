@@ -8,7 +8,9 @@ por número o por texto aproximado, en vez de requerir el texto exacto
 de una sola vez.
 """
 
+import re
 import time
+from difflib import SequenceMatcher
 
 NUMEROS_PALABRA = {
     "uno": 1, "primero": 1, "primer": 1,
@@ -29,6 +31,59 @@ NUMEROS_PALABRA = {
 # =========================================================
 
 UMBRAL_SIMILITUD_DIFUSA = 0.80
+
+# =========================================================
+# COINCIDENCIA DIFUSA CONTRA UN SET DE FRASES FIJAS
+# FIX/NUEVO: todo el proyecto está lleno de comparaciones tipo
+# `comando in ALGUNAS_FRASES_FIJAS` (listar recordatorios, cancelar
+# temporizador, pedir ayuda, "ábrelo"/"ciérralo", etc) — cada una
+# exige coincidencia EXACTA del texto completo contra un set chico
+# de frases conocidas. Es exactamente el mismo tipo de fragilidad
+# que ya se resolvió puntualmente para la wake word (wakeword.py) y
+# los nombres de macro (macros.py): si Whisper transcribe la frase
+# con el más mínimo error (una palabra separada de más, un acento
+# perdido, un signo pegado al final — "duorme te." en vez de
+# "duérmete", "no molestad" en vez de "no molestar"), no matchea
+# NADA, aunque la intención sea clarísima para cualquier persona
+# escuchando, y el comando cae innecesariamente a la IA (más lento,
+# menos predecible) o se pierde del todo.
+#
+# Esta función centraliza ese mismo mecanismo de tolerancia
+# (SequenceMatcher sobre el texto sin espacios ni signos de
+# puntuación, mismo umbral compartido de 0.80) para que CUALQUIER
+# módulo del proyecto pueda reemplazar `comando in FRASES_FIJAS` por
+# `frase_coincide_difuso(comando, FRASES_FIJAS)` sin duplicar la
+# lógica de comparación difusa cada vez que aparece este patrón.
+# =========================================================
+
+def frase_coincide_difuso(texto, frases, umbral=None):
+    """
+    True si `texto` coincide EXACTO con alguna frase de `frases`
+    (list/set de strings), o es lo bastante parecido a alguna de
+    ellas según similitud difusa.
+
+    `umbral` por defecto usa UMBRAL_SIMILITUD_DIFUSA — se puede pasar
+    uno distinto puntualmente, pero mantener el mismo valor
+    compartido en la mayoría de los casos evita tener varios números
+    mágicos sueltos por el proyecto para "qué tan parecido es
+    suficiente".
+    """
+    if not texto:
+        return False
+
+    if texto in frases:
+        return True
+
+    umbral = UMBRAL_SIMILITUD_DIFUSA if umbral is None else umbral
+
+    texto_compacto = re.sub(r"[.,;:!?¡¿]", "", texto).replace(" ", "")
+
+    for frase in frases:
+        frase_compacta = frase.replace(" ", "")
+        if SequenceMatcher(None, texto_compacto, frase_compacta).ratio() >= umbral:
+            return True
+
+    return False
 
 # =========================================================
 # "ESPERA" / DAME UN MOMENTO

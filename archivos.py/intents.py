@@ -1,6 +1,8 @@
 import re
-from aliases import traducir_alias
+from difflib import SequenceMatcher
+from aliases import traducir_alias, existe_alias
 from memory import memoria, obtener_historial
+from voz_utils import frase_coincide_difuso
 
 # =========================================================
 # NORMALIZAR
@@ -20,6 +22,17 @@ CORRECCIONES = {
     "buttering":   "wuthering",
     "fasmofobia":  "phasmophobia",
     "phasmofobia": "phasmophobia",
+    # FIX/NUEVO: caso real reportado — Whisper transcribió "no
+    # molestar" como "no molestad" (confusión r/d, común al final de
+    # una frase dicha rápido). Como FRASES_NO_MOLESTAR más abajo
+    # busca por substring EXACTO ("no molestar" dentro del comando),
+    # "no molestad" no coincidía con nada y el comando caía
+    # innecesariamente a la IA — que además devolvió un valor
+    # inesperado ("Spotify") para un intent que ni siquiera lo usa.
+    # Con esta corrección, "cancela el modo no molestad" se normaliza
+    # a "...no molestar" ANTES de llegar a esa detección, y se
+    # resuelve con la regla rápida, sin pasar por la IA para nada.
+    "molestad":    "molestar",
 }
 
 def normalizar(comando):
@@ -153,6 +166,40 @@ def _extraer_minutos_no_molestar(texto):
     return 60  # default: una hora
 
 
+def _es_app_conocida(nombre):
+    """
+    True si `nombre` es una app/juego/alias que el asistente ya
+    conoce (está en la caché, en el índice de juegos, en el de apps,
+    o es un alias registrado) — usado como segunda señal de confianza
+    por el fallback difuso de verbos de media (ver más abajo): un
+    verbo mal transcrito es más creíble como error de transcripción
+    cuando lo que sigue SÍ es una app real y reconocida, en vez de
+    cualquier palabra suelta.
+
+    Import diferido de app_finder (evita el costo de cargarlo para
+    cada llamada a detectar_intent si nunca hace falta esta rama) y
+    tolerante a fallos (si algo no está inicializado todavía, se
+    asume que no es una app conocida en vez de romper la detección
+    de intents por completo).
+    """
+    if not nombre:
+        return False
+
+    if existe_alias(nombre):
+        return True
+
+    try:
+        import app_finder
+        clave = app_finder.limpiar_nombre(nombre)
+        return (
+            clave in app_finder.cache
+            or clave in app_finder.games_index
+            or clave in app_finder.apps_index
+        )
+    except Exception:
+        return False
+
+
 def detectar_intent(comando):
 
     comando = normalizar(comando)
@@ -251,6 +298,18 @@ def detectar_intent(comando):
         "otra vez", "de nuevo",
     ]
 
+    # NOTA: MINIMIZAR_ESTO/MAXIMIZAR_ESTO (más abajo) se comparan con
+    # IGUALDAD EXACTA a propósito, NO con frase_coincide_difuso() —
+    # "minimízalo" y "maximízalo" dan un ratio de exactamente 0.80
+    # entre sí (casi anagramas: solo cambian "in"/"ax"), justo en el
+    # umbral. Con tolerancia difusa acá, un error de transcripción en
+    # cualquiera de los dos podía ejecutar la acción CONTRARIA a la
+    # pedida — minimizar en vez de maximizar, o viceversa — un caso
+    # bastante peor que simplemente no reconocer el comando (que ya
+    # pasa a la IA como respaldo). ABRIR_ESTO/CERRAR_ESTO SÍ quedan
+    # con tolerancia difusa: se verificó que el ratio entre ambos
+    # sets nunca supera 0.56, sin riesgo real de cruzarse.
+
     MINIMIZAR_ESTO = [
         "minimízalo", "minimizalo",
         "minimízala", "minimizala",
@@ -267,9 +326,9 @@ def detectar_intent(comando):
     ]
 
     if ultima:
-        if comando in CERRAR_ESTO:
+        if frase_coincide_difuso(comando, CERRAR_ESTO):
             return "cerrar_app", ultima
-        if comando in ABRIR_ESTO:
+        if frase_coincide_difuso(comando, ABRIR_ESTO):
             return "abrir_app", ultima
         if comando in MINIMIZAR_ESTO:
             return "minimizar_app", ultima
@@ -304,6 +363,18 @@ def detectar_intent(comando):
         "cierra la anterior", "cierra el anterior",
         "cierra la app anterior",
     }
+
+    # NOTA: estos dos sets se comparan con IGUALDAD EXACTA a
+    # propósito, NO con frase_coincide_difuso() como la mayoría de
+    # los demás sets de frases fijas de este archivo — "el anterior"/
+    # "la anterior" es demasiado parecido (ratio ~0.89) a la palabra
+    # suelta "anterior" que SIGUIENTE_FIJAS/ANTERIOR_FIJAS usan más
+    # abajo para "canción anterior"/"video anterior". Con tolerancia
+    # difusa acá, decir solo "anterior" (para saltar a la canción
+    # anterior) se interpretaba por error como "la app anterior del
+    # historial" — un caso real encontrado al probar este mismo
+    # archivo, ver el mismo problema documentado junto a
+    # LISTAR_TEMPORIZADORES más abajo.
 
     if comando in ABRIR_LA_ANTERIOR:
         historial_abrir = obtener_historial("abrir_app")
@@ -341,7 +412,7 @@ def detectar_intent(comando):
         "busca una actualización", "buscar actualización",
         "busca si hay actualizaciones",
     }
-    if comando in BUSCAR_ACTUALIZACION_FRASES:
+    if frase_coincide_difuso(comando, BUSCAR_ACTUALIZACION_FRASES):
         return "buscar_actualizacion", ""
 
     if comando.startswith(("busca ", "buscar ")):
@@ -547,7 +618,7 @@ def detectar_intent(comando):
         "tengo algun recordatorio",
     }
 
-    if comando in LISTAR_RECORDATORIOS:
+    if frase_coincide_difuso(comando, LISTAR_RECORDATORIOS):
         return "listar_recordatorios", "recordatorios"
 
     # =====================================================
@@ -622,6 +693,16 @@ def detectar_intent(comando):
 
     # =====================================================
     # LISTAR TEMPORIZADORES
+    # NOTA: este set se compara con IGUALDAD EXACTA a propósito, NO
+    # con frase_coincide_difuso() — "cuánto falta del temporizador"
+    # da un ratio de 0.809 (por encima del umbral 0.80) contra
+    # "cancela el temporizador", así que con tolerancia difusa acá
+    # "cancela el temporizador" se interpretaba por error como
+    # LISTAR en vez de CANCELAR (este set se revisa antes que
+    # CANCELAR_TEMPORIZADOR_EXACTO más abajo) — un caso real
+    # encontrado al probar este archivo. Comparten demasiado
+    # vocabulario ("temporizador") entre sí como para tolerar
+    # variaciones sin arriesgar cruzarse con el intent equivocado.
     # =====================================================
 
     LISTAR_TEMPORIZADORES = {
@@ -654,7 +735,7 @@ def detectar_intent(comando):
         "deten el temporizador",
     }
 
-    if comando in CANCELAR_TEMPORIZADOR_EXACTO:
+    if frase_coincide_difuso(comando, CANCELAR_TEMPORIZADOR_EXACTO):
         return "cancelar_temporizador", ""
 
     CANCELAR_TEMPORIZADOR_PREFIJOS = [
@@ -720,47 +801,89 @@ def detectar_intent(comando):
         "elimina aliases", "elimina los alias",
     }
 
-    if comando in ELIMINAR_ALIAS_SIN_NOMBRE:
+    if frase_coincide_difuso(comando, ELIMINAR_ALIAS_SIN_NOMBRE):
         return "eliminar_alias", ""
 
     # =====================================================
     # MODO NO MOLESTAR
+    # FIX: antes exigía que la frase EMPEZARA exactamente con uno de
+    # unos pocos patrones fijos ("activa no molestar", "modo no
+    # molestar", etc, vía comando.startswith(p)) — decir "activa EL
+    # MODO no molestar" (con "el modo" de más en el medio) no
+    # coincidía con NINGUNO de esos prefijos exactos, así que el
+    # comando nunca se reconocía como esta acción.
+    #
+    # Ahora se busca por CONTENIDO (la frase clave en cualquier parte
+    # del comando, no solo al principio) — mucho más tolerante a
+    # variaciones naturales de cómo alguien pide lo mismo ("activa el
+    # modo no molestar", "por favor activa el modo no molestar",
+    # "quiero que actives el no molestar" ya funcionan; antes solo
+    # "activa no molestar" a secas, textual, funcionaba).
+    #
+    # IMPORTANTE: por eso DESACTIVAR y ESTADO se revisan ANTES que
+    # ACTIVAR acá abajo, no después como estaba antes — "desactiva no
+    # molestar" CONTIENE literalmente el substring "activa no
+    # molestar" (des+"activa no molestar"), así que con matching por
+    # contenido, si ACTIVAR se revisara primero, "desactiva no
+    # molestar" activaría el modo en vez de desactivarlo. Revisando
+    # primero las palabras de desactivación/consulta, y solo cayendo
+    # a "activar" como opción por descarte, se evita ese choque.
     # =====================================================
 
-    NO_MOLESTAR_ACTIVAR = [
-        "no me molestes", "modo no molestar", "activa no molestar",
-        "silencia los avisos", "silencia las notificaciones",
+    FRASES_NO_MOLESTAR = (
+        "no molestar", "modo concentracion", "modo concentración",
+        "modo silencio", "silencia los avisos", "silencia las notificaciones",
         "silencia los recordatorios", "silencia los temporizadores",
-        "no me interrumpas", "no me avises",
-        "modo concentración", "modo concentracion",
-        "modo silencio",
-    ]
+        "no me interrumpas", "no me avises", "no me molestes",
+    )
 
-    for p in NO_MOLESTAR_ACTIVAR:
-        if comando.startswith(p) or comando == p:
-            # extraer duración de la frase si la hay
-            resto = comando[len(p):].strip()
-            minutos = _extraer_minutos_no_molestar(resto)
-            return "activar_no_molestar", str(minutos)
-
-    NO_MOLESTAR_DESACTIVAR = {
-        "desactiva no molestar", "desactivar no molestar",
-        "cancela no molestar", "ya puedes molestarme",
-        "ya puedes avisarme", "reactiva los avisos",
-        "sal del modo silencio", "sal del modo no molestar",
-        "desactiva el modo no molestar",
+    # FIX: estas 3 frases de desactivar NO contienen literalmente "no
+    # molestar" (ni ninguna de las otras frases de FRASES_NO_MOLESTAR),
+    # así que el chequeo por contenido de más abajo nunca las
+    # atraparía — se revisan aparte, explícitamente, ANTES.
+    FRASES_DESACTIVAR_NM_EXPLICITAS = {
+        "ya puedes molestarme", "ya puedes avisarme", "reactiva los avisos",
     }
 
-    if comando in NO_MOLESTAR_DESACTIVAR:
+    if frase_coincide_difuso(comando, FRASES_DESACTIVAR_NM_EXPLICITAS):
         return "desactivar_no_molestar", ""
 
-    NO_MOLESTAR_ESTADO = {
-        "estado no molestar", "tienes el modo no molestar",
-        "está activo el modo no molestar", "estás en modo no molestar",
-    }
+    if any(frase in comando for frase in FRASES_NO_MOLESTAR):
 
-    if comando in NO_MOLESTAR_ESTADO:
-        return "estado_no_molestar", ""
+        # FIX/NUEVO: "cancela" (stem con la 'a' final incluida) solo
+        # matcheaba la conjugación singular ("cancela el no
+        # molestar") — "cancelen" (plural, ej. "cancelen el modo no
+        # molestar") o "cancelar" (infinitivo) NO contienen "cancela"
+        # como substring exacto, así que ninguna de esas dos formas
+        # activaba esta rama. El comando entonces "caía por descarte"
+        # a activar_no_molestar más abajo — el resultado opuesto a lo
+        # que el usuario pidió, en vez de simplemente fallar o pasar
+        # a la IA. Se usa el stem sin la vocal final ("cancel"), que
+        # es substring de cancela/cancelas/cancelo/cancelen/cancelar/
+        # cancelamos por igual.
+        PALABRAS_DESACTIVAR_NM = (
+            "desactiv", "cancel", "sal del", "ya puedes",
+            "reactiva", "quita el", "apaga el", "detén el", "detente",
+        )
+        PALABRAS_ESTADO_NM = (
+            "estado", "tienes el", "esta activo", "está activo",
+            "estas en", "estás en", "cuanto queda", "cuánto queda",
+            "cuanto falta", "cuánto falta", "cuánto tiempo", "cuanto tiempo",
+        )
+
+        if any(p in comando for p in PALABRAS_DESACTIVAR_NM):
+            return "desactivar_no_molestar", ""
+
+        if any(p in comando for p in PALABRAS_ESTADO_NM):
+            return "estado_no_molestar", ""
+
+        # ni desactivar ni consultar estado -> se asume que se quiere
+        # activar. _extraer_minutos_no_molestar ya busca el patrón de
+        # duración con una búsqueda (no un prefijo anclado), así que
+        # funciona igual sobre el comando completo sin necesitar
+        # recortar la frase disparadora primero.
+        minutos = _extraer_minutos_no_molestar(comando)
+        return "activar_no_molestar", str(minutos)
 
     # =====================================================
     # MEDIA / REPRODUCCIÓN
@@ -822,10 +945,10 @@ def detectar_intent(comando):
         "track anterior", "la anterior", "pista anterior",
     }
 
-    if comando in SIGUIENTE_FIJAS:
+    if frase_coincide_difuso(comando, SIGUIENTE_FIJAS):
         return "media_siguiente", "media"
 
-    if comando in ANTERIOR_FIJAS:
+    if frase_coincide_difuso(comando, ANTERIOR_FIJAS):
         return "media_anterior", "media"
 
     PREFIJOS_SIGUIENTE_CORTOS = ["siguiente", "skip", "salta"]
@@ -909,6 +1032,80 @@ def detectar_intent(comando):
         return "media_silenciar", "media"  # toggle
 
     # =====================================================
+    # FALLBACK DIFUSO PARA VERBOS DE MEDIA
+    # NUEVO: todo el matching de arriba (PAUSAR, REANUDAR, SIGUIENTE,
+    # ANTERIOR, SILENCIAR) exige coincidencia EXACTA de texto — si
+    # Whisper transcribe mal el verbo, nada de eso lo reconoce y el
+    # comando cae en la IA, que puede adivinar mal. Caso real
+    # reportado: "reanuda spotify" se transcribió como "rganoda
+    # spotify" — no matcheaba nada de arriba, la IA lo interpretó
+    # como "abre spotify", y terminó REABRIENDO la app en vez de
+    # reanudarla (con Spotify ya abierto, esto es más disruptivo que
+    # un simple "no entendí": ejecuta la acción EQUIVOCADA).
+    #
+    # Mismo mecanismo de tolerancia que la wake word (SequenceMatcher,
+    # ver wakeword.py) pero aplicado a la PRIMERA PALABRA del comando
+    # contra los verbos de media de una sola palabra — si Whisper
+    # garabateó el verbo pero el resto del comando (ej. "spotify") se
+    # transcribió bien y es una app conocida, se recupera sin
+    # necesitar la IA.
+    #
+    # El umbral es MÁS BAJO que el estándar del proyecto (0.70 en vez
+    # de 0.80, ver UMBRAL_SIMILITUD_DIFUSA en voz_utils.py) PERO SOLO
+    # cuando el resto del comando es una app/alias reconocido — con
+    # una app real de por medio como segunda señal de confianza, el
+    # umbral puede relajarse sin disparar con cualquier palabra
+    # suelta. Sin una app reconocida de por medio, se exige el umbral
+    # estándar completo, más estricto.
+    #
+    # Calibrado contra medición real, no a ojo: "rganoda" vs
+    # "reanuda" da 0.714 — por debajo del 0.80 estándar, así que hacía
+    # falta bajarlo. Se probó un barrido de ~40 palabras reales del
+    # proyecto (verbos de otras acciones: "abre", "activa", "busca",
+    # "recapturar", "ayuda", etc.) contra los verbos de media — el
+    # más cercano de todos ellos ("recapturar"/"ayuda" vs "reanudar")
+    # da 0.667, así que 0.70 deja un margen limpio: atrapa el caso
+    # real reportado sin acercarse a ningún otro comando real.
+    # =====================================================
+
+    VERBOS_MEDIA_DIFUSOS = {
+        "pausa":     "media_pausar",
+        "pausar":    "media_pausar",
+        "reanuda":   "media_reanudar",
+        "reanudar":  "media_reanudar",
+        "siguiente": "media_siguiente",
+        "anterior":  "media_anterior",
+        "silencia":  "media_silenciar",
+        "silenciar": "media_silenciar",
+    }
+
+    UMBRAL_DIFUSO_CON_APP = 0.70
+    UMBRAL_DIFUSO_SIN_APP = 0.80
+
+    palabras_comando = comando.split(" ", 1)
+    primera_palabra  = palabras_comando[0] if palabras_comando else ""
+    resto_comando    = palabras_comando[1].strip() if len(palabras_comando) > 1 else ""
+
+    if primera_palabra:
+        mejor_intent = None
+        mejor_ratio  = 0.0
+
+        for verbo, intent_candidato in VERBOS_MEDIA_DIFUSOS.items():
+            ratio = SequenceMatcher(None, primera_palabra, verbo).ratio()
+            if ratio > mejor_ratio:
+                mejor_ratio  = ratio
+                mejor_intent = intent_candidato
+
+        app_reconocida = _es_app_conocida(resto_comando)
+        umbral_efectivo = UMBRAL_DIFUSO_CON_APP if app_reconocida else UMBRAL_DIFUSO_SIN_APP
+
+        if mejor_intent and mejor_ratio >= umbral_efectivo:
+            if mejor_intent in ("media_siguiente", "media_anterior", "media_silenciar"):
+                return mejor_intent, "media"
+            app = traducir_alias(resto_comando) if resto_comando else "media"
+            return mejor_intent, app or "media"
+
+    # =====================================================
     # VOLUMEN EXACTO
     # =====================================================
 
@@ -985,7 +1182,7 @@ def detectar_intent(comando):
         "qué puedo pedirte", "que puedo pedirte",
     }
 
-    if comando in AYUDA:
+    if frase_coincide_difuso(comando, AYUDA):
         return "ayuda", ""
 
     # =====================================================
@@ -1051,7 +1248,7 @@ def detectar_intent(comando):
         "ver macros", "muestra mis macros",
     ]
 
-    if comando in LISTAR_MACROS:
+    if frase_coincide_difuso(comando, LISTAR_MACROS):
         return "listar_macros", "macros"
 
     ELIMINAR_MACRO = [
@@ -1070,7 +1267,7 @@ def detectar_intent(comando):
         "borra una macro", "borra la macro", "borra macro",
     }
 
-    if comando in ELIMINAR_MACRO_SIN_NOMBRE:
+    if frase_coincide_difuso(comando, ELIMINAR_MACRO_SIN_NOMBRE):
         return "eliminar_macro", ""
 
     # =====================================================
@@ -1085,7 +1282,7 @@ def detectar_intent(comando):
         "actualización disponible", "actualizacion disponible",
     }
 
-    if comando in BUSCAR_ACTUALIZACION:
+    if frase_coincide_difuso(comando, BUSCAR_ACTUALIZACION):
         return "buscar_actualizacion", ""
 
     # =====================================================

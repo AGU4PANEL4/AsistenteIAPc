@@ -39,9 +39,27 @@ datos_tokenizers = collect_data_files("tokenizers")
 # la transcripción falla con NO_SUCHFILE buscando silero_vad_v6.onnx.
 datos_faster_whisper = collect_data_files("faster_whisper")
 
+# NUEVO: certifi trae el archivo cacert.pem con la lista de
+# autoridades certificadoras confiables — requests (actualizador.py,
+# hablando con la API de GitHub) y el cliente de Groq (que usa httpx
+# por debajo) lo necesitan para verificar certificados SSL en
+# CUALQUIER petición HTTPS. Corriendo con "python main.py" esto
+# funciona solo porque el certifi del entorno de desarrollo ya está
+# instalado normalmente y Python lo encuentra sin ayuda — pero
+# PyInstaller no copia archivos de datos por análisis de imports (el
+# mismo motivo por el que hay que declarar datos_faster_whisper y
+# datos_tokenizers arriba), así que sin esto el .exe empaquetado
+# podía fallar con errores de verificación SSL ("certificate verify
+# failed") en CUALQUIER cosa que hable HTTPS: buscar actualizaciones,
+# o Groq si no fallaba antes por otro motivo — un problema muy
+# conocido y común al empaquetar apps que usan requests/httpx con
+# PyInstaller, fácil de pasar por alto porque nunca se nota en
+# desarrollo, solo en el .exe ya armado.
+datos_certifi = collect_data_files("certifi")
+
 datas = [
     (str(RUTA_SR), "speech_recognition"),
-] + datos_tokenizers + datos_faster_whisper
+] + datos_tokenizers + datos_faster_whisper + datos_certifi
 
 hiddenimports = [
     # winsdk usa imports dinámicos por namespace que PyInstaller no
@@ -95,7 +113,21 @@ hiddenimports = [
     "PIL",
     "PIL.Image",
     "PIL.ImageDraw",
+
+    # certifi — ver el comentario junto a datos_certifi más arriba.
+    "certifi",
 ]
+
+# NOTA/TROUBLESHOOTING: si al probar el .exe empaquetado ves un error
+# de import relacionado con "httpx" (la librería HTTP que usa el
+# cliente de groq por debajo), agregá "httpx" a hiddenimports acá
+# arriba — httpx importa algunos de sus backends de transporte de
+# forma condicional (try/except ImportError), un patrón que el
+# análisis estático de PyInstaller puede no detectar como "esto se
+# usa de verdad". No se agrega de entrada porque groq/httpx son
+# imports directos y normales (`import groq`), que si análisis
+# estático SÍ sigue correctamente en la gran mayoría de los casos —
+# esto es solo la salida rápida si llegara a fallar igual.
 
 block_cipher = None
 
