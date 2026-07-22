@@ -16,15 +16,30 @@ import webbrowser
 import psutil
 import time
 import subprocess
-import ctypes as _ctypes
 from pathlib import Path
 from urllib.parse import quote
-import win32gui
-import win32con
-import win32process
 import re
 import threading
-import winshell
+
+from plataforma import es_windows, es_linux
+
+# NUEVO: win32gui/win32con/win32process (pywin32) y winshell solo
+# existen en Windows — antes se importaban sin condición alguna, así
+# que el simple hecho de importar acciones_apps.py en Linux tumbaba
+# el asistente completo con un ModuleNotFoundError. ctypes en sí es
+# de la librería estándar (existe en cualquier plataforma), pero
+# ctypes.windll (usado más abajo en _simular_tecla_alt) solo existe
+# en Windows — esa función ya se guarda aparte con es_windows().
+import ctypes as _ctypes
+
+if es_windows():
+    import win32gui
+    import win32con
+    import win32process
+    import winshell
+else:
+    win32gui = win32con = win32process = winshell = None
+    import ventanas_linux
 
 from voice import escuchar, escuchar_confirmacion
 from tts import hablar
@@ -83,6 +98,14 @@ class _INPUT_ALT(_ctypes.Structure):
 
 
 def _simular_tecla_alt():
+    # NUEVO: LockSetForegroundWindow es un mecanismo específico de
+    # Windows — en Linux/X11 no existe la misma restricción de "robar
+    # el foco", así que este truco no tiene sentido ni falta ahí. No
+    # se hace nada (en vez de intentar ctypes.windll, que ni siquiera
+    # existe como atributo fuera de Windows).
+    if not es_windows():
+        return
+
     try:
         INPUT_KEYBOARD = 1
         extra = _ctypes.c_ulong(0)
@@ -100,6 +123,38 @@ def _simular_tecla_alt():
         print("[FOCO] No pude simular ALT:", e)
 
 # =========================================================
+
+# =========================================================
+# ABRIR RECURSO (archivo o protocolo custom) — MULTIPLATAFORMA
+# NUEVO: os.startfile() solo existe en Windows. Se usa para lanzar
+# tanto rutas de archivo normales como protocolos custom registrados
+# (steam://rungameid/X, com.epicgames.launcher://...).
+# =========================================================
+
+def _abrir_recurso(recurso):
+    """
+    Abre un recurso — un protocolo/URI custom (ej.
+    "steam://rungameid/X") o una ruta de archivo normal — de la
+    forma correcta según la plataforma.
+
+    En Windows, os.startfile() es el mecanismo nativo: resuelve
+    cualquier protocolo registrado o ruta de archivo, igual que un
+    doble clic o Win+R.
+
+    En Linux, el equivalente estándar es "xdg-open" (paquete
+    xdg-utils, presente por defecto en casi cualquier distro de
+    escritorio) — resuelve protocolos custom registrados de la misma
+    forma. Steam en Linux SÍ se registra como manejador de steam://
+    al instalarse, así que lanzar juegos por este medio funciona
+    igual de bien ahí. Epic Games Launcher no corre en Linux (ver
+    app_finder._escanear_juegos_epic), así que ese caso puntual nunca
+    se alcanza en la práctica en este sistema operativo.
+    """
+    if es_windows():
+        os.startfile(recurso)
+    else:
+        subprocess.Popen(["xdg-open", recurso])
+
 
 def obtener_snapshot():
     snapshot = {}
@@ -301,34 +356,65 @@ def capturar_pids_por_nombre(
 
         time.sleep(1)
 
-    def enum_windows(hwnd, _):
-        try:
-            if not win32gui.IsWindowVisible(hwnd):
-                return
-            _, pid = win32process.GetWindowThreadProcessId(hwnd)
-            proc   = psutil.Process(pid)
-            name   = proc.name()
-            exe    = ""
+    if es_windows():
+        def enum_windows(hwnd, _):
             try:
-                exe = proc.exe()
-            except Exception:
+                if not win32gui.IsWindowVisible(hwnd):
+                    return
+                _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                proc   = psutil.Process(pid)
+                name   = proc.name()
+                exe    = ""
+                try:
+                    exe = proc.exe()
+                except Exception:
+                    pass
+                if es_contaminacion(name, exe):
+                    return
+                name_norm = normalizar(name.replace(".exe", ""))
+                exe_norm  = normalizar(exe)
+                if (
+                    nombre_base in name_norm
+                    or name_norm in nombre_base
+                    or nombre_base in exe_norm
+                    or any(c in exe.lower() for c in carpetas)
+                ):
+                    print(f"[VENTANA] {pid} {name}")
+                    agregar_proceso(pid, name, exe)
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
                 pass
-            if es_contaminacion(name, exe):
-                return
-            name_norm = normalizar(name.replace(".exe", ""))
-            exe_norm  = normalizar(exe)
-            if (
-                nombre_base in name_norm
-                or name_norm in nombre_base
-                or nombre_base in exe_norm
-                or any(c in exe.lower() for c in carpetas)
-            ):
-                print(f"[VENTANA] {pid} {name}")
-                agregar_proceso(pid, name, exe)
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            pass
 
-    win32gui.EnumWindows(enum_windows, None)
+        win32gui.EnumWindows(enum_windows, None)
+    else:
+        # NUEVO: mismo criterio de coincidencia que la rama Windows de
+        # arriba, pero recorriendo los PIDs con ventana visible que
+        # reporta wmctrl (ver ventanas_linux.py) en vez de usar
+        # win32gui.EnumWindows — el resto de la lógica de matching es
+        # idéntica, ya que no depende de ninguna API específica de
+        # plataforma, solo de nombre/exe del proceso dueño.
+        for pid in ventanas_linux.pids_con_ventana_visible():
+            try:
+                proc = psutil.Process(pid)
+                name = proc.name()
+                exe  = ""
+                try:
+                    exe = proc.exe()
+                except Exception:
+                    pass
+                if es_contaminacion(name, exe):
+                    continue
+                name_norm = normalizar(name.replace(".exe", ""))
+                exe_norm  = normalizar(exe)
+                if (
+                    nombre_base in name_norm
+                    or name_norm in nombre_base
+                    or nombre_base in exe_norm
+                    or any(c in exe.lower() for c in carpetas)
+                ):
+                    print(f"[VENTANA] {pid} {name}")
+                    agregar_proceso(pid, name, exe)
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
 
     encontrados = set(pids)
     for _ in range(10):
@@ -533,7 +619,14 @@ def esta_abierta(nombre):
 # =========================================================
 
 def traer_al_frente(nombre):
-    nombre   = normalizar(nombre)
+    nombre = normalizar(nombre)
+
+    if es_windows():
+        return _traer_al_frente_windows(nombre)
+    return _traer_al_frente_linux(nombre)
+
+
+def _traer_al_frente_windows(nombre):
     ventanas = []
 
     def callback(hwnd, _):
@@ -563,6 +656,14 @@ def traer_al_frente(nombre):
         return True
     except Exception:
         return False
+
+
+def _traer_al_frente_linux(nombre):
+    def _coincide(nombre_proceso):
+        pname = normalizar(nombre_proceso)
+        return nombre == pname or nombre in pname or pname in nombre
+
+    return ventanas_linux.traer_al_frente_por_nombre(_coincide)
 
 # =========================================================
 # CERRAR APP — MATCH DIRECTO CONTRA PROCESOS EN EJECUCIÓN
@@ -656,112 +757,205 @@ def _procesos_en_ejecucion_que_coinciden(nombre_limpio):
     return coincidencias
 
 
-def _cerrar_ventanas_de_proceso(pid, timeout=4):
+def _cerrar_multiples_ventanas(pids, timeout=2.5):
     """
-    Manda WM_CLOSE a todas las ventanas visibles de nivel superior que
-    pertenezcan a `pid` -- el mismo cierre "amable" que un Alt+F4, que
-    le da a la app oportunidad de preguntar "¿guardar cambios?" antes
-    de cerrarse, en vez de matarla en seco de una.
+    Manda WM_CLOSE a todas las ventanas visibles de todos los `pids`
+    en una sola pasada (sin esperar entre uno y otro), y después hace
+    UN solo poll conjunto para ver si todos murieron — mucho más
+    rápido que cerrar cada PID secuencialmente cuando una app tiene
+    varios procesos (Chrome, Discord, VS Code, etc.).
 
-    FIX/NUEVO: antes, cerrar_app() iba DIRECTO a proc.terminate() (un
-    cierre forzado real en Windows, sin ningún aviso a la app) para
-    todo lo que cerraba -- si tenías un Word o Notepad con cambios
-    sin guardar y decías "cierra word", los perdías sin ningún aviso,
-    ni siquiera la oportunidad de decir que no. Ahora se intenta esto
-    PRIMERO; solo si la app no responde sola dentro de `timeout`
-    segundos (ver _terminar_pid) se recién se fuerza el cierre.
-
-    Devuelve True si el proceso terminó solo dentro de `timeout`
-    segundos. Si el proceso no tiene ninguna ventana visible (típico
-    de procesos de fondo/helpers sin UI, ej. steamwebhelper.exe), no
-    tiene sentido "cerrar amablemente" -- devuelve False de inmediato
-    para que _terminar_pid pase directo al cierre forzado, sin
-    esperar nada de más.
+    Devuelve el conjunto de PIDs que SIGUEN vivos después del timeout
+    (los que no respondieron al cierre amable). Conjunto vacío si
+    todos cerraron.
     """
-    hwnds = []
+    pids_vivos = set(pids)
 
-    def _enum_callback(hwnd, _):
-        if win32gui.IsWindowVisible(hwnd):
+    if es_windows():
+        hwnds = []
+
+        def _enum_callback(hwnd, _):
+            if not win32gui.IsWindowVisible(hwnd):
+                return True
             try:
                 _, pid_ventana = win32process.GetWindowThreadProcessId(hwnd)
-                if pid_ventana == pid:
+                if pid_ventana in pids_vivos:
                     hwnds.append(hwnd)
             except Exception:
                 pass
-        return True
+            return True
 
-    try:
-        win32gui.EnumWindows(_enum_callback, None)
-    except Exception:
-        return False
-
-    if not hwnds:
-        return False
-
-    for hwnd in hwnds:
         try:
-            win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
+            win32gui.EnumWindows(_enum_callback, None)
         except Exception:
             pass
+
+        for hwnd in hwnds:
+            try:
+                win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
+            except Exception:
+                pass
+    else:
+        for pid in list(pids_vivos):
+            ids_ventana = ventanas_linux.ventanas_de_pid(pid)
+            for id_ventana in ids_ventana:
+                ventanas_linux.cerrar_ventana(id_ventana)
 
     inicio = time.time()
-    while time.time() - inicio < timeout:
-        if not psutil.pid_exists(pid):
-            return True
-        time.sleep(0.2)
+    while time.time() - inicio < timeout and pids_vivos:
+        for pid in list(pids_vivos):
+            if not psutil.pid_exists(pid):
+                pids_vivos.discard(pid)
+        if pids_vivos:
+            time.sleep(0.2)
 
-    return False
+    return pids_vivos
 
 
-def _terminar_pid(pid):
+def _terminar_pids(pids):
     """
-    Intenta cerrar un proceso por PID, con esta cadena de respaldo:
+    Intenta cerrar una app completa (uno o varios PIDs) con esta
+    cadena de respaldo, en paralelo donde es posible:
 
-      1. Cierre AMABLE (WM_CLOSE a sus ventanas, ver
-         _cerrar_ventanas_de_proceso) -- le da a la app oportunidad
-         de guardar cambios pendientes antes de cerrarse. Solo aplica
-         si tiene ventanas visibles; los procesos sin UI pasan de
-         largo a este paso sin ninguna espera de más.
-      2. terminate() normal (señal de cierre estándar de Windows).
-      3. kill() si no respondió a tiempo.
-      4. taskkill si hay permisos insuficientes.
-      5. PowerShell elevado como último recurso.
+      1. Cierre AMABLE de TODAS las ventanas a la vez
+         (_cerrar_multiples_ventanas con timeout de 2.5s)
+      2. terminate() para los PIDs que quedaron vivos
+         (wait reducido a 1.5s — si una app va a responder a
+         terminate, lo hace casi al instante)
+      3. kill() si no respondieron a terminate()
+      4. SOLO EN WINDOWS: taskkill y PowerShell elevado como
+         último recurso para procesos con permisos altos
 
-    Devuelve True si el proceso quedó cerrado (o ya no existía),
-    False si ningún método funcionó.
+    Devuelve True si TODOS los PIDs quedaron cerrados.
     """
-    if _cerrar_ventanas_de_proceso(pid):
+    if not pids:
         return True
 
-    try:
-        proc = psutil.Process(pid)
-        proc.terminate()
-        try:
-            proc.wait(timeout=3)
-        except psutil.TimeoutExpired:
-            proc.kill()
-        return True
-    except psutil.NoSuchProcess:
-        return True  # ya no existe, considerar éxito
-    except (psutil.AccessDenied, Exception):
-        try:
-            resultado_tk = subprocess.run(
-                ["taskkill", "/F", "/PID", str(pid)],
-                capture_output=True,
-            )
-            if resultado_tk.returncode == 0:
-                return True
-        except Exception:
-            pass
+    vivos = _cerrar_multiples_ventanas(pids)
 
+    if not vivos:
+        return True
+
+    for pid in list(vivos):
         try:
-            subprocess.run(
-                ["powershell", "-Command", f"Stop-Process -Id {pid} -Force"],
-                capture_output=True,
-            )
-            return True
-        except Exception:
-            return False
+            proc = psutil.Process(pid)
+            proc.terminate()
+            try:
+                proc.wait(timeout=1.5)
+            except psutil.TimeoutExpired:
+                proc.kill()
+            vivos.discard(pid)
+        except psutil.NoSuchProcess:
+            vivos.discard(pid)
+        except (psutil.AccessDenied, Exception):
+            if not es_windows():
+                continue
+
+            try:
+                resultado_tk = subprocess.run(
+                    ["taskkill", "/F", "/PID", str(pid)],
+                    capture_output=True,
+                )
+                if resultado_tk.returncode == 0:
+                    vivos.discard(pid)
+            except Exception:
+                pass
+
+            if pid in vivos:
+                try:
+                    subprocess.run(
+                        ["powershell", "-Command", f"Stop-Process -Id {pid} -Force"],
+                        capture_output=True,
+                    )
+                    vivos.discard(pid)
+                except Exception:
+                    pass
+
+    return len(vivos) == 0
+
+
+# =========================================================
+# CERRAR TODOS LOS JUEGOS ABIERTOS
+# NUEVO: usado por "cierra todos los juegos" (standalone) y por el
+# modo estudio/enfoque (intents.py combina esto con
+# activar_no_molestar en una sola "cadena" — ver el comentario ahí).
+#
+# A diferencia de cerrar_app() (necesita que el usuario diga el
+# NOMBRE de la app para buscarla en cache/índices), esto no depende
+# de ningún nombre — usa app_finder.procesos_de_juegos_en_ejecucion(),
+# que cruza TODOS los procesos corriendo contra la carpeta de
+# instalación real de cada juego indexado (Steam/Epic), así que
+# funciona igual de bien con un juego que el usuario abrió por su
+# cuenta (doble clic en el launcher, ej.) que con uno abierto por
+# voz — nunca depende de que el asistente lo haya "visto" antes.
+# Reutiliza el mismo mecanismo de cierre amable primero, forzado
+# después (ver _terminar_pids) que usa cerrar_app()
+# cerrar_app(): cierre amable con WM_CLOSE primero, forzado después)
+# en vez de un taskkill directo — así un juego con progreso para
+# guardar tiene, igual que cualquier otra app, la misma oportunidad
+# de reaccionar a un cierre normal antes de ser forzado.
+# =========================================================
+
+def cerrar_juegos_abiertos(valor=None):
+    """
+    Cierra todos los juegos detectados corriendo en este momento.
+
+    Devuelve (éxito, mensaje). éxito=True tanto si cerró algo como si
+    no había ningún juego corriendo — no encontrar nada para cerrar
+    no es un error, es el estado esperado si ya estabas "limpio".
+    """
+    juegos = app_finder.procesos_de_juegos_en_ejecucion()
+
+    if not juegos:
+        return True, "No tenías ningún juego abierto"
+
+    cerrados = []
+
+    # FIX/NUEVO: antes se cerraba PID por PID secuencialmente con
+    # _terminar_pid() — para juegos que corren con varios procesos
+    # (launcher + juego + helper) esto acumulaba ~7s de espera por
+    # cada uno (4s de cierre amable + 3s de terminate wait). Ahora
+    # _terminar_pids() cierra todos en batch: manda WM_CLOSE a todas
+    # las ventanas de una sola vez, espera 2.5s, y recién fuerza lo
+    # que quedó — mismo resultado, mucho más rápido.
+
+    todos_pids = set()
+    juegos_por_pid = {}
+    for juego in juegos:
+        for pid in juego["pids"]:
+            todos_pids.add(pid)
+            juegos_por_pid[pid] = juego["nombre"]
+
+    if todos_pids:
+        vivos = _cerrar_multiples_ventanas(todos_pids)
+        for pid in list(vivos):
+            try:
+                proc = psutil.Process(pid)
+                proc.terminate()
+                try:
+                    proc.wait(timeout=1.5)
+                except psutil.TimeoutExpired:
+                    proc.kill()
+                vivos.discard(pid)
+            except psutil.NoSuchProcess:
+                vivos.discard(pid)
+            except Exception:
+                pass
+
+        for pid in todos_pids:
+            if pid not in vivos:
+                nombre = juegos_por_pid.get(pid, "juego")
+                if nombre not in cerrados:
+                    cerrados.append(nombre)
+
+    if not cerrados:
+        return False, "Encontré juegos abiertos pero no pude cerrarlos"
+
+    if len(cerrados) == 1:
+        return True, f"Cerré {cerrados[0]}"
+
+    cuerpo = ", ".join(cerrados[:-1]) + " y " + cerrados[-1]
+    return True, f"Cerré {len(cerrados)} juegos: {cuerpo}"
 
 
 # =========================================================
@@ -795,13 +989,9 @@ def cerrar_app(nombre):
     if coincidencias_directas:
         print(f"[CERRAR DIRECTO] {nombre_original} -> {coincidencias_directas}")
 
-        cerrado_directo = False
-        for pid, nombre_proceso in coincidencias_directas:
-            if _terminar_pid(pid):
-                cerrado_directo = True
-                print(f"[CERRAR DIRECTO OK] {nombre_proceso} (pid {pid})")
-
-        if cerrado_directo:
+        pids_directos = [pid for pid, _ in coincidencias_directas]
+        if _terminar_pids(pids_directos):
+            print(f"[CERRAR DIRECTO OK] todos los procesos cerrados")
             # se guarda el alias con el nombre de proceso real (sin
             # .exe) como referencia — no es tan preciso como el
             # nombre_cache que arma buscar_app() (no sabemos la
@@ -903,12 +1093,17 @@ def cerrar_app(nombre):
     cerrados = False
 
     # primero intentar por PIDs guardados (más preciso que por nombre)
+    # FIX/NUEVO: se juntan todos los PIDs en un solo batch vía
+    # _terminar_pids() — cierra todas las ventanas a la vez, espera
+    # 2.5s, y recién fuerza lo que quede, en vez de secuencial por PID.
     if pids_guardados:
-        for pid in list(pids_guardados):
-            if _terminar_pid(pid):
-                cerrados = True
-                print(f"[CERRAR PID] {pid}")
+        if _terminar_pids(list(pids_guardados)):
+            cerrados = True
+            print(f"[CERRAR PID] batch ok")
 
+    # para los que quedaron vivos o si no había PIDs guardados,
+    # intentar por nombre de proceso (procesos_guardados) y carpeta
+    pids_por_match = set()
     for proc in psutil.process_iter(["pid", "name", "exe"]):
         try:
             name = (proc.info["name"] or "").lower()
@@ -920,16 +1115,15 @@ def cerrar_app(nombre):
             if not (por_nombre or por_carpeta):
                 continue
 
-            print(f"[CERRAR] {proc.info['pid']} {name}")
-
-            if _terminar_pid(proc.info["pid"]):
-                cerrados = True
-                print(f"[CERRAR OK] {name}")
-            else:
-                print(f"[CERRAR ERROR] {name}")
+            pid = proc.info["pid"]
+            pids_por_match.add(pid)
+            print(f"[CERRAR] {pid} {name}")
 
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
+
+    if pids_por_match and _terminar_pids(list(pids_por_match)):
+        cerrados = True
 
     return cerrados, nombre_cache
 
@@ -1005,7 +1199,7 @@ def abrir_app(nombre):
 
         if appid:
             snapshot = obtener_snapshot()
-            os.startfile(f"steam://rungameid/{appid}")
+            _abrir_recurso(f"steam://rungameid/{appid}")
 
             threading.Thread(
                 target=capturar_pids_por_nombre,
@@ -1047,7 +1241,7 @@ def abrir_app(nombre):
 
         if app_name:
             snapshot = obtener_snapshot()
-            os.startfile(f"com.epicgames.launcher://apps/{app_name}?action=launch&silent=true")
+            _abrir_recurso(f"com.epicgames.launcher://apps/{app_name}?action=launch&silent=true")
 
             threading.Thread(
                 target=capturar_pids_por_nombre,
@@ -1155,7 +1349,7 @@ def abrir_app(nombre):
                                 .replace(".acf", "")
                             )
                             print("Steam AppID:", appid)
-                            os.startfile(f"steam://rungameid/{appid}")
+                            _abrir_recurso(f"steam://rungameid/{appid}")
                             ejecutado_por_steam = True
 
                             threading.Thread(
@@ -1178,10 +1372,23 @@ def abrir_app(nombre):
     # =====================================
 
     if not ejecutado_por_steam:
-        if ruta_str.endswith(".lnk"):
-            subprocess.Popen(f'start "" "{ruta_str}"', shell=True)
+        if es_windows():
+            if ruta_str.endswith(".lnk"):
+                subprocess.Popen(f'start "" "{ruta_str}"', shell=True)
+            else:
+                subprocess.Popen(ruta_str, shell=True)
         else:
-            subprocess.Popen(ruta_str, shell=True)
+            # NUEVO: en Linux no hay ni ".lnk" ni necesidad de invocar
+            # una shell — se intenta ejecutar el binario directo
+            # primero (más seguro que shell=True: no hay que lidiar
+            # con comillas/espacios especiales en la ruta), y si no es
+            # directamente ejecutable (ej. es en realidad un archivo
+            # .desktop, o un documento asociado a otra app), se cae a
+            # xdg-open, que resuelve por tipo MIME como corresponda.
+            try:
+                subprocess.Popen([ruta_str])
+            except (PermissionError, OSError):
+                subprocess.Popen(["xdg-open", ruta_str])
 
         threading.Thread(
             target=capturar_pids_por_nombre,
@@ -1324,6 +1531,12 @@ def _obtener_pids_app(nombre):
 
 def _buscar_ventanas_por_nombre(nombre, incluir_ocultas=False):
     """Helper: busca ventanas por nombre de proceso o procesos en cache."""
+    if es_windows():
+        return _buscar_ventanas_por_nombre_windows(nombre, incluir_ocultas)
+    return _buscar_ventanas_por_nombre_linux(nombre, incluir_ocultas)
+
+
+def _buscar_ventanas_por_nombre_windows(nombre, incluir_ocultas=False):
     pids_app = _obtener_pids_app(nombre)
     ventanas = []
 
@@ -1359,6 +1572,26 @@ def _buscar_ventanas_por_nombre(nombre, incluir_ocultas=False):
     return [hwnd for hwnd, _ in ventanas]
 
 
+def _buscar_ventanas_por_nombre_linux(nombre, incluir_ocultas=False):
+    """
+    Equivalente Linux — `incluir_ocultas` no tiene un correlato
+    directo con wmctrl: a diferencia de Windows (donde "visible"
+    excluye ventanas minimizadas), wmctrl YA incluye ventanas
+    minimizadas en su listado normal, así que este parámetro no
+    cambia el resultado acá — siempre se buscan todas las que wmctrl
+    reporte para los PIDs de esta app.
+    """
+    pids_app = _obtener_pids_app(nombre)
+    if not pids_app:
+        return []
+
+    return [
+        id_ventana
+        for id_ventana, pid, _titulo in ventanas_linux.listar_ventanas()
+        if pid in pids_app
+    ]
+
+
 def minimizar_app(nombre):
 
     nombre  = nombre.lower().strip()
@@ -1367,11 +1600,15 @@ def minimizar_app(nombre):
     if not ventanas:
         return False, nombre
 
-    for hwnd in ventanas:
-        try:
-            win32gui.ShowWindow(hwnd, win32con.SW_MINIMIZE)
-        except Exception:
-            pass
+    if es_windows():
+        for hwnd in ventanas:
+            try:
+                win32gui.ShowWindow(hwnd, win32con.SW_MINIMIZE)
+            except Exception:
+                pass
+    else:
+        for id_ventana in ventanas:
+            ventanas_linux.minimizar_ventana(id_ventana)
 
     return True, nombre
 
@@ -1383,6 +1620,40 @@ def minimizar_app(nombre):
 def maximizar_app(nombre):
 
     nombre = nombre.lower().strip()
+
+    if es_windows():
+        return _maximizar_app_windows(nombre)
+    return _maximizar_app_linux(nombre)
+
+
+def _maximizar_app_linux(nombre):
+    """
+    Mucho más simple que el lado Windows (ver _maximizar_app_windows)
+    — X11 y la inmensa mayoría de gestores de ventanas Linux NO
+    tienen el mismo mecanismo de "robo de foco bloqueado"
+    (LockSetForegroundWindow) que tiene Windows, así que no hace
+    falta ningún truco de tecla ALT, AttachThreadInput, toggle de
+    TOPMOST, ni un comando externo de refuerzo: "wmctrl -a" (ver
+    ventanas_linux.activar_ventana) ya restaura y da foco real en un
+    solo paso, tal como lo haría un click del usuario en la barra de
+    tareas.
+    """
+    ventanas = []
+    for intento in range(3):
+        ventanas = _buscar_ventanas_por_nombre(nombre, incluir_ocultas=False)
+        if ventanas:
+            break
+        if intento < 2:
+            time.sleep(1)
+
+    if not ventanas:
+        return False, nombre
+
+    exito = ventanas_linux.activar_ventana(ventanas[0])
+    return exito, nombre
+
+
+def _maximizar_app_windows(nombre):
 
     for intento in range(3):
 

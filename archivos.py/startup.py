@@ -5,6 +5,7 @@ import tempfile
 import ctypes
 from pathlib import Path
 from logger import log
+from plataforma import es_linux
 
 NOMBRE_ASISTENTE = "AsistenteIA"
 
@@ -130,7 +131,7 @@ def ruta_archivo_startup():
 #      así psutil puede cerrar procesos elevados directamente
 # =========================================================
 
-def activar_inicio_automatico():
+def _activar_inicio_automatico_windows():
     try:
         if getattr(sys, "frozen", False):
             ruta_exe   = Path(sys.executable).resolve()
@@ -248,9 +249,9 @@ def activar_inicio_automatico():
 # DESACTIVAR
 # =========================================================
 
-def desactivar_inicio_automatico():
+def _desactivar_inicio_automatico_windows():
     try:
-        # FIX: misma razón que en activar_inicio_automatico() — borrar
+        # FIX: misma razón que en _activar_inicio_automatico_windows() — borrar
         # una tarea registrada con privilegios elevados también puede
         # requerir permisos de admin. Si no los hay, se eleva igual
         # vía UAC en vez de fallar en silencio.
@@ -270,15 +271,113 @@ def desactivar_inicio_automatico():
 
 # =========================================================
 # ESTADO
-# FIX: activar_inicio_automatico() crea una tarea programada
+# FIX: _activar_inicio_automatico_windows() crea una tarea programada
 # (schtasks), no el .bat de la carpeta Startup. Revisar el .bat
 # aquí siempre devolvía False aunque el inicio automático
 # estuviera activo. Ahora se consulta la tarea programada real.
 # =========================================================
 
-def startup_activado():
+def _startup_activado_windows():
     resultado = subprocess.run(
         ["schtasks", "/Query", "/TN", "AsistenteIA"],
         capture_output=True
     )
     return resultado.returncode == 0
+
+
+# =========================================================
+# LINUX — XDG AUTOSTART
+# NUEVO: en Linux, el inicio automático se resuelve MUCHO más simple
+# que en Windows — no hace falta ninguna tarea programada ni ningún
+# privilegio elevado (UAC no existe acá). El estándar XDG Autostart
+# (freedesktop.org, seguido por GNOME, KDE, XFCE, Cinnamon, MATE, y
+# prácticamente cualquier entorno de escritorio Linux moderno) dice:
+# cualquier archivo .desktop en ~/.config/autostart/ se ejecuta solo
+# al iniciar la sesión gráfica del usuario. Es un archivo de texto
+# plano en la carpeta DEL USUARIO, nada de administrador.
+# =========================================================
+
+NOMBRE_ARCHIVO_DESKTOP = "AsistenteIA.desktop"
+
+
+def _ruta_autostart_linux():
+    base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    carpeta = Path(base) / "autostart"
+    carpeta.mkdir(parents=True, exist_ok=True)
+    return carpeta / NOMBRE_ARCHIVO_DESKTOP
+
+
+def _comando_lanzamiento_linux():
+    """Comando completo para relanzar el asistente — el .exe
+    empaquetado si está frozen, o "python3 main.py" si corre desde
+    código fuente (mismo criterio que ya usa activar_inicio_automatico
+    en Windows para distinguir ambos casos)."""
+    if getattr(sys, "frozen", False):
+        return f'"{Path(sys.executable).resolve()}"'
+
+    ruta_python = str(Path(sys.executable).resolve())
+    ruta_main   = str(Path(__file__).resolve().parent / "main.py")
+    return f'"{ruta_python}" "{ruta_main}"'
+
+
+def _activar_inicio_automatico_linux():
+    try:
+        contenido = (
+            "[Desktop Entry]\n"
+            "Type=Application\n"
+            "Name=AsistenteIA\n"
+            f"Exec={_comando_lanzamiento_linux()}\n"
+            "X-GNOME-Autostart-enabled=true\n"
+            "NoDisplay=false\n"
+            "Comment=Asistente de voz con IA\n"
+        )
+        _ruta_autostart_linux().write_text(contenido, encoding="utf-8")
+        print("[Startup] Archivo de autostart creado (Linux)")
+        return True
+    except Exception as e:
+        print("[Startup] Error activando el inicio automático:", e)
+        log.exception("Error activando el inicio automático (Linux)")
+        return False
+
+
+def _desactivar_inicio_automatico_linux():
+    try:
+        ruta = _ruta_autostart_linux()
+        if ruta.exists():
+            ruta.unlink()
+        print("[Startup] Archivo de autostart eliminado (Linux)")
+        return True
+    except Exception as e:
+        print("[Startup] Error desactivando el inicio automático:", e)
+        log.exception("Error desactivando el inicio automático (Linux)")
+        return False
+
+
+def _startup_activado_linux():
+    return _ruta_autostart_linux().exists()
+
+
+# =========================================================
+# DESPACHADORES PÚBLICOS
+# NUEVO: estos son los tres nombres que el resto del proyecto usa
+# (tools.py, main.py, instalador.iss vía --activar-startup) — eligen
+# la implementación real según el sistema operativo, sin que quien
+# llama necesite saber nada de la diferencia.
+# =========================================================
+
+def activar_inicio_automatico():
+    if es_linux():
+        return _activar_inicio_automatico_linux()
+    return _activar_inicio_automatico_windows()
+
+
+def desactivar_inicio_automatico():
+    if es_linux():
+        return _desactivar_inicio_automatico_linux()
+    return _desactivar_inicio_automatico_windows()
+
+
+def startup_activado():
+    if es_linux():
+        return _startup_activado_linux()
+    return _startup_activado_windows()

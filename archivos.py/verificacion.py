@@ -5,9 +5,11 @@ import time
 import tempfile
 import os
 import threading
+import psutil
 
 from config import MODELO_OLLAMA
 from logger import log
+from plataforma import es_windows, es_linux
 
 # =========================================================
 # VERIFICAR
@@ -49,8 +51,7 @@ def modelo_instalado():
 
 def instalar_ollama(callback_progreso=None):
     """
-    Descarga el instalador de Ollama, lo ejecuta, y espera a que el
-    usuario confirme que terminó de instalarlo.
+    Instala Ollama y espera a que el usuario confirme que terminó.
 
     `callback_progreso`, si se da, se llama con un texto corto en
     cada etapa (ej. "Descargando Ollama... 42%") — pensado para
@@ -65,6 +66,22 @@ def instalar_ollama(callback_progreso=None):
     Tkinter (ver setup_ollama_gui.py), mismo patrón ya usado para la
     key de Groq, que además verifica de verdad que Ollama quedó
     instalado antes de dejar continuar.
+
+    NUEVO: en Linux esto NO descarga ni ejecuta nada por su cuenta —
+    a diferencia de Windows (donde hay un instalador .exe que
+    cualquier usuario puede correr con un doble clic, con o sin
+    admin), el instalador oficial de Ollama para Linux es un script
+    de shell (curl | sh) que necesita sudo para escribir en
+    /usr/local/bin y registrar su servicio systemd. No hay un
+    equivalente universal al cuadro de UAC de Windows para pedir esa
+    elevación desde una app gráfica sin arriesgar comportamiento
+    distinto según la distro/entorno de escritorio (pkexec no está
+    en todas partes, y ejecutar un script de terceros con privilegios
+    elevados sin que el usuario lo vea primero no es buena práctica
+    de todas formas). Se le muestra el comando exacto para que lo
+    corra en su propia terminal — mantiene control total de lo que
+    se instala con privilegios de root — y se reusa el mismo flujo de
+    "confirmar cuando termine" que ya existe para Windows.
     """
 
     def _reportar(texto):
@@ -74,6 +91,20 @@ def instalar_ollama(callback_progreso=None):
                 callback_progreso(texto)
             except Exception:
                 pass
+
+    if es_linux():
+        _reportar("Esperando instalación de Ollama...")
+        try:
+            from setup_ollama_gui import esperar_confirmacion_instalacion_gui
+            if not esperar_confirmacion_instalacion_gui():
+                print("[Ollama] Instalación cancelada por el usuario.")
+                log.warning("Usuario canceló la instalación de Ollama en el diálogo de confirmación")
+                return False
+            return True
+        except Exception as e:
+            print("Error esperando instalación de Ollama:", e)
+            log.exception("Error en el flujo de instalación de Ollama (Linux)")
+            return False
 
     try:
         _reportar("Descargando Ollama...")
@@ -166,11 +197,20 @@ def iniciar_ollama():
 
     try:
         print("Iniciando Ollama...")
+        # FIX/NUEVO: creationflags=CREATE_NO_WINDOW es un parámetro de
+        # subprocess que SOLO existe en Windows (evita que se abra una
+        # ventanita de consola para el proceso hijo) — en Linux ni
+        # existe como atributo, así que pasarlo ahí tira
+        # AttributeError antes de siquiera intentar lanzar Ollama. No
+        # hace falta ningún equivalente: en Linux un proceso lanzado
+        # con Popen no abre ninguna ventana de consola propia para
+        # empezar.
+        kwargs_extra = {"creationflags": subprocess.CREATE_NO_WINDOW} if es_windows() else {}
         subprocess.Popen(
             ["ollama", "serve"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            creationflags=subprocess.CREATE_NO_WINDOW
+            **kwargs_extra,
         )
     except Exception as e:
         print("Error iniciando Ollama:", e)
@@ -208,29 +248,45 @@ def ollama_detenido():
 
 
 def detener_ollama():
+    """
+    FIX/NUEVO: antes esto usaba "taskkill /IM ollama.exe" — un
+    comando que solo existe en Windows. Ahora se usa psutil (ya es
+    dependencia del proyecto, ver acciones_apps.py) para encontrar y
+    terminar los procesos por NOMBRE en vez de por comando de
+    sistema — funciona igual en Windows y en Linux sin necesitar
+    ninguna rama por plataforma acá, porque psutil ya abstrae esa
+    diferencia por su cuenta (proc.terminate() manda la señal de
+    cierre correcta para cada sistema operativo).
+    """
     if ollama_detenido():
         return True
 
     try:
         print("Deteniendo Ollama...")
-        # /IM ollama.exe cierra el proceso principal; /T también
-        # cierra cualquier proceso hijo (como el propio llama-server,
-        # que Ollama lanza como subproceso) — /F fuerza el cierre sin
-        # pedir confirmación, necesario porque ollama.exe normalmente
-        # no responde a un cierre "amable" al no tener ventana.
-        subprocess.run(
-            ["taskkill", "/IM", "ollama.exe", "/T", "/F"],
-            capture_output=True,
-            creationflags=subprocess.CREATE_NO_WINDOW,
-        )
-        # llama-server.exe puede quedar corriendo como proceso
-        # separado incluso después de matar ollama.exe en algunas
-        # versiones — se mata explícitamente también, por seguridad.
-        subprocess.run(
-            ["taskkill", "/IM", "llama-server.exe", "/T", "/F"],
-            capture_output=True,
-            creationflags=subprocess.CREATE_NO_WINDOW,
-        )
+
+        # "ollama.exe"/"llama-server.exe" en Windows, "ollama"/
+        # "llama-server" en Linux (sin la extensión) — se comparan
+        # ambas formas para no depender de en qué plataforma corre.
+        NOMBRES_A_TERMINAR = {"ollama", "ollama.exe", "llama-server", "llama-server.exe"}
+
+        terminados = []
+        for proc in psutil.process_iter(["pid", "name"]):
+            try:
+                nombre = (proc.info.get("name") or "").lower()
+                if nombre in NOMBRES_A_TERMINAR:
+                    proc.terminate()
+                    terminados.append(proc)
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+
+        # dar un margen para que cierren solos antes de forzar
+        _, vivos = psutil.wait_procs(terminados, timeout=3)
+        for proc in vivos:
+            try:
+                proc.kill()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+
     except Exception as e:
         print("Error deteniendo Ollama:", e)
         log.exception("Error deteniendo Ollama (puede quedar consumiendo GPU de fondo)")

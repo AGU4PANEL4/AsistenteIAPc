@@ -3,6 +3,8 @@ import os
 import sys
 from pathlib import Path
 
+from rutas_datos import CARPETA_DATOS
+
 # =====================================
 # CARPETA DATOS
 # =====================================
@@ -12,9 +14,12 @@ if getattr(sys, "frozen", False):
 else:
     BASE_DIR = Path(__file__).resolve().parent
 
-CONFIG_DIR = Path.home() / "AppData" / "Local" / "AsistenteIA"
-
-CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+# FIX/NUEVO: antes esto estaba hardcodeado a "AppData/Local" — ni
+# siquiera usaba la variable de entorno LOCALAPPDATA (que sí podría
+# apuntar a otro lado), y encima ese literal de ruta solo existe en
+# Windows. Ahora usa rutas_datos.py (multiplataforma) — en Windows
+# sigue siendo exactamente la misma carpeta de siempre.
+CONFIG_DIR = CARPETA_DATOS
 
 ARCHIVO_CONFIG = CONFIG_DIR / "config.json"
 

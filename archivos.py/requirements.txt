@@ -6,6 +6,13 @@ groq>=0.11.0
 
 # Voz
 SpeechRecognition==3.16.1
+# NUEVO: PyAudio necesita la librería de sistema "portaudio" para
+# compilarse en Linux (pip por sí solo no alcanza) —
+#   Debian/Ubuntu:  sudo apt install portaudio19-dev python3-dev
+#   Fedora:         sudo dnf install portaudio-devel python3-devel
+#   Arch:           sudo pacman -S portaudio
+# antes de "pip install PyAudio", o el pip install falla directo con
+# un error de compilación (no es un problema del paquete en sí).
 PyAudio==0.2.14
 edge-tts==7.2.8
 pygame==2.6.1
@@ -22,14 +29,24 @@ numpy==2.4.6
 # tutorial que lo mencione), desinstalar con:
 #   pip uninstall openai-whisper torch torchvision torchaudio -y
 
-# Control de medios / sistema (Windows)
-pywin32==311
-winshell==0.6
-comtypes==1.4.16
-pycaw==20251023
-winsdk==1.0.0b10
-pyautogui==0.9.54
+# Control de medios / sistema (solo Windows — ver media_control.py,
+# acciones_apps.py, app_finder.py, startup.py, instancia.py, que usan
+# ramas por plataforma y solo importan estos paquetes en Windows)
+pywin32==311; sys_platform == "win32"
+winshell==0.6; sys_platform == "win32"
+comtypes==1.4.16; sys_platform == "win32"
+pycaw==20251023; sys_platform == "win32"
+winsdk==1.0.0b10; sys_platform == "win32"
+pyautogui==0.9.54; sys_platform == "win32"
 psutil==7.2.2
+
+# NUEVO: equivalentes Linux de lo de arriba — ver
+# media_control_linux.py, ventanas_linux.py, forma_ventana_linux.py.
+# python-xlib es la única dependencia de PYPI nueva; playerctl,
+# pactl, wmctrl y xdotool son utilidades de sistema (se instalan con
+# el gestor de paquetes de la distro, no con pip — ver el comentario
+# de más abajo).
+python-xlib==0.33; sys_platform == "linux"
 
 # Red / utilidades
 requests==2.34.2
@@ -37,3 +54,32 @@ requests==2.34.2
 # Interfaz — splash de carga, bandeja del sistema
 pystray==0.19.5
 Pillow==11.0.0
+
+# Interfaz — prototipo en evaluación (ver charla sobre rediseño de ui.py)
+# NUEVO: todavía no reemplaza a Tkinter, es un prototipo aparte que se
+# prueba con main_web.py mientras se decide si vale la pena migrar.
+pywebview==4.4.1
+
+# =====================================================================
+# DEPENDENCIAS DE SISTEMA EN LINUX (no son paquetes de pip — instalar
+# con el gestor de paquetes de la distro antes de correr el asistente)
+#
+#   Debian/Ubuntu:  sudo apt install wmctrl xdotool playerctl pulseaudio-utils
+#   Fedora:         sudo dnf install wmctrl xdotool playerctl pulseaudio-utils
+#   Arch:           sudo pacman -S wmctrl xdotool playerctl libpulse
+#
+# Sin estas, el asistente sigue arrancando y funcionando (voz,
+# recordatorios, macros, alias, no molestar, abrir/cerrar apps,
+# comandos de sistema) — pero cada función específica que dependa de
+# la utilidad faltante avisa con claridad en consola/log en vez de
+# fallar en silencio (ver _wmctrl_disponible/_xdotool_disponible en
+# ventanas_linux.py, _playerctl_disponible/_pactl_disponible en
+# media_control_linux.py).
+#
+# También se asume systemd (systemctl/loginctl) para apagar/reiniciar/
+# suspender/bloquear la PC y para el modo híbrido de energía — es el
+# init system por defecto en Ubuntu, Fedora, Debian, Arch y la
+# inmensa mayoría de distros de escritorio actuales. En una distro
+# sin systemd (ej. Void Linux con runit) esos comandos puntuales no
+# van a funcionar; el resto del asistente no se ve afectado.
+# =====================================================================

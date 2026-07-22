@@ -3,11 +3,15 @@ import os
 import threading
 from pathlib import Path
 
+from rutas_datos import CARPETA_DATOS
+
 # =========================================================
 # ARCHIVO
+# NUEVO: CARPETA_DATOS ahora viene de rutas_datos.py (multiplataforma
+# — ver ese archivo para el detalle) en vez de calcularse acá con
+# os.environ["LOCALAPPDATA"], que solo existe en Windows.
 # =========================================================
 
-CARPETA_DATOS   = Path(os.environ["LOCALAPPDATA"]) / "AsistenteIA"
 ARCHIVO_ALIASES = CARPETA_DATOS / "aliases.json"
 
 # =========================================================

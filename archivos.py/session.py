@@ -8,14 +8,14 @@ sesion = {
     # normal hasta que se diga la palabra de despertar, para quien
     # quiera privacidad/silencio un rato sin cerrar el asistente del
     # todo. Ver el manejo completo en main.py.
+    #
+    # FIX/NUEVO: dormido y no_molestar son modos COMPLETAMENTE
+    # independientes — antes había acá una bandera extra
+    # ("dormido_activo_no_molestar") para que dormirse activara
+    # no_molestar automáticamente y lo desactivara solo al despertar.
+    # A pedido, se sacó: dormir ya no toca no_molestar para nada, cada
+    # uno se activa solo si el usuario lo pide explícitamente.
     "dormido":   False,
-    # NUEVO: True si fue "duérmete" quien activó no_molestar (no el
-    # usuario por su cuenta) — ver el FIX detallado en main.py, en el
-    # bloque de es_dormir()/despertar. Distingue "no_molestar está
-    # activo porque me dormí" de "no_molestar ya estaba activo antes
-    # de dormirme, con su propia duración" — para no pisar ni cortar
-    # antes de tiempo una duración que el usuario eligió a propósito.
-    "dormido_activo_no_molestar": False,
 }
 
 # =========================================================

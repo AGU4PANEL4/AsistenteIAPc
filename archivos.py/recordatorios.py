@@ -9,14 +9,13 @@ from pathlib import Path
 from tts import hablar
 from tiempo_utils import parsear_duracion
 from logger import log
+from rutas_datos import CARPETA_DATOS
 
 # =========================================================
 # ARCHIVO
-# Mismo patrón que memory.py / aliases.py: JSON en la carpeta
-# de datos del asistente.
+# NUEVO: CARPETA_DATOS ahora viene de rutas_datos.py (multiplataforma).
 # =========================================================
 
-CARPETA_DATOS        = Path(os.environ["LOCALAPPDATA"]) / "AsistenteIA"
 ARCHIVO_RECORDATORIOS = CARPETA_DATOS / "recordatorios.json"
 
 # =========================================================

@@ -25,14 +25,20 @@ diálogo se muestra como un tk.Toplevel del ÚNICO root compartido que
 ya mantiene vivo el splash (ver splash.ejecutar_en_hilo_gui) — nunca
 se crea un tk.Tk() nuevo acá.
 
-El instalador real de Ollama sigue abriéndose normalmente en su
-propia ventana externa (ver instalar_ollama() en verificacion.py);
-esta ventana solo reemplaza la espera bloqueante de la consola.
+En Windows, el instalador real de Ollama se abre solo en su propia
+ventana externa (ver instalar_ollama() en verificacion.py) — este
+diálogo solo reemplaza la espera bloqueante de la consola.
+
+NUEVO: en Linux, instalar_ollama() NO descarga ni ejecuta nada por su
+cuenta (ver el comentario detallado ahí) — este mismo diálogo muestra
+en cambio el comando exacto que el usuario debe correr en su propia
+terminal, en un campo de texto seleccionable para copiar fácil.
 """
 
 import tkinter as tk
 
 from splash import ejecutar_en_hilo_gui
+from plataforma import es_linux
 
 C_BG        = "#0b1a1f"
 C_BORDE     = "#1c3a3f"
@@ -41,7 +47,11 @@ C_TEXTO     = "#7fb3ad"
 C_TEXTO_DIM = "#3a5a5c"
 C_ROJO      = "#ff5566"
 
-ANCHO, ALTO = 380, 270
+COMANDO_INSTALAR_LINUX = "curl -fsSL https://ollama.com/install.sh | sh"
+
+ANCHO       = 380
+ALTO_WIN    = 270
+ALTO_LINUX  = 320   # un poco más alto para que entre el campo del comando
 
 
 def esperar_confirmacion_instalacion_gui():
@@ -63,6 +73,8 @@ def esperar_confirmacion_instalacion_gui():
 def _mostrar_dialogo(root):
     from verificacion import ollama_instalado
 
+    alto = ALTO_LINUX if es_linux() else ALTO_WIN
+
     dialogo = tk.Toplevel(root)
     dialogo.overrideredirect(True)
     dialogo.attributes("-topmost", True)
@@ -72,8 +84,8 @@ def _mostrar_dialogo(root):
     sw = dialogo.winfo_screenwidth()
     sh = dialogo.winfo_screenheight()
     x = (sw - ANCHO) // 2
-    y = (sh - ALTO) // 2
-    dialogo.geometry(f"{ANCHO}x{ALTO}+{x}+{y}")
+    y = (sh - alto) // 2
+    dialogo.geometry(f"{ANCHO}x{alto}+{x}+{y}")
 
     tk.Frame(dialogo, bg=C_BORDE, height=1).pack(fill="x")
 
@@ -81,13 +93,42 @@ def _mostrar_dialogo(root):
              font=("Segoe UI", 12, "bold"),
              fg=C_ACENTO, bg=C_BG).pack(pady=(18, 6))
 
-    tk.Label(
-        dialogo,
-        text=("Se abrió el instalador de Ollama en otra ventana.\n"
-              "Completalo con las opciones por defecto y, cuando\n"
-              "termine, volvé acá y hacé clic en \"Continuar\"."),
-        font=("Segoe UI", 9), fg=C_TEXTO, bg=C_BG, justify="center",
-    ).pack(pady=(0, 14))
+    if es_linux():
+        tk.Label(
+            dialogo,
+            text=("Abrí una terminal y corré este comando (necesita tu\n"
+                  "contraseña de administrador). Cuando termine, volvé\n"
+                  "acá y hacé clic en \"Continuar\"."),
+            font=("Segoe UI", 9), fg=C_TEXTO, bg=C_BG, justify="center",
+        ).pack(pady=(0, 10))
+
+        # campo de texto seleccionable con el comando — un Entry en
+        # vez de un Label porque sí se puede seleccionar/copiar texto
+        # de un Entry con el mouse, cosa que un Label no permite.
+        entry_comando = tk.Entry(
+            dialogo, font=("Consolas", 9), justify="center",
+            bg="#10262c", fg=C_ACENTO, insertbackground=C_TEXTO,
+            relief="flat",
+        )
+        entry_comando.insert(0, COMANDO_INSTALAR_LINUX)
+        entry_comando.config(state="readonly", readonlybackground="#10262c")
+        entry_comando.pack(fill="x", padx=20, pady=(0, 4), ipady=6)
+        entry_comando.bind("<Button-1>", lambda e: (
+            entry_comando.selection_range(0, tk.END)
+        ))
+
+        tk.Label(
+            dialogo, text="(clic en el campo para seleccionar todo y copiar)",
+            font=("Segoe UI", 7), fg=C_TEXTO_DIM, bg=C_BG,
+        ).pack(pady=(0, 10))
+    else:
+        tk.Label(
+            dialogo,
+            text=("Se abrió el instalador de Ollama en otra ventana.\n"
+                  "Completalo con las opciones por defecto y, cuando\n"
+                  "termine, volvé acá y hacé clic en \"Continuar\"."),
+            font=("Segoe UI", 9), fg=C_TEXTO, bg=C_BG, justify="center",
+        ).pack(pady=(0, 14))
 
     lbl_estado = tk.Label(dialogo, text="", font=("Segoe UI", 8),
                           fg=C_ROJO, bg=C_BG, wraplength=ANCHO - 40)

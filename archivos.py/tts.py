@@ -1,71 +1,206 @@
 import asyncio
 import io
+import os
 import threading
+import time
+import hashlib
 import edge_tts
 import pygame
+from pathlib import Path
 from logger import log
 
 # =========================================================
-# VOZ
-# es-CO-SalomeNeural = voz colombiana femenina
-# es-CO-GonzaloNeural = voz colombiana masculina
+# CONFIGURACIÓN DE VOZ
+# =========================================================
+# FIX: voz configurable. El usuario puede cambiarla editando
+# config.py o el archivo de configuración. Por ahora, leer
+# de config.py si existe, sino usar default.
 # =========================================================
 
-VOZ = "es-CO-SalomeNeural"
+VOZ_DEFAULT = "es-CO-SalomeNeural"
+
+# Voces disponibles en español por Edge TTS
+VOCES_DISPONIBLES = {
+    # Femeninas
+    "salome": "es-CO-SalomeNeural",
+    "elvira": "es-ES-ElviraNeural",
+    "dalia": "es-MX-DaliaNeural",
+    "karina": "es-ES-KarinaNeural",
+    "lucia": "es-ES-LuciaNeural",
+    "mexicanaf": "es-MX-LorenaNeural",
+    # Masculinas
+    "alvaro": "es-ES-AlvaroNeural",
+    "jorge": "es-MX-JorgeNeural",
+    "tomas": "es-AR-TomasNeural",
+    "gerardo": "es-MX-GerardoNeural",
+    "mexicanom": "es-MX-RaulNeural",
+    "neerlandes": "es-NL-MaartenNeural",
+}
+
+try:
+    from config import VOZ_ASISTENTE
+    VOZ = VOZ_ASISTENTE
+except ImportError:
+    VOZ = VOZ_DEFAULT
+
 
 # =========================================================
-# INICIALIZAR PYGAME MIXER UNA SOLA VEZ
+# CACHE DE AUDIO LOCAL
+# =========================================================
+# NUEVO: precarga frases comunes como archivos de audio locales.
+# La primera vez que el asistente arranca, genera los audios de
+# las frases más frecuentes y los guarda en disco. Las próximas
+# veces, reproduce directo desde el archivo — sin red, sin delay.
+# =========================================================
+
+_CARPETA_CACHE_TTS = Path.home() / ".asistente_ia" / "cache_tts"
+_CARPETA_CACHE_TTS.mkdir(parents=True, exist_ok=True)
+
+# Frases que se precargan en cache al inicio
+_FRASES_PRECARGAR = [
+    "Asistente listo",
+    "¿En qué puedo ayudarte?",
+    "¿Algo más?",
+    "¿Necesitás algo más?",
+    "Cancelado",
+    "Hasta luego",
+    "Sesión finalizada",
+    "No entendí qué quieres que haga, ¿podés repetirlo?",
+    "Te escucho, dime qué necesitas",
+    "Ya estoy de vuelta",
+    "Me quedo en silencio",
+    "No tengo forma de procesar eso ahora",
+    "Se está demorando mucho en responder, intenta de nuevo en un momento",
+    "Todavía no dije nada",
+    "Tuve un error inesperado, sigamos",
+    "¿Sigues ahí?",
+]
+
+_cache_audio = {}  # texto normalizado -> bytes de audio
+
+
+def _hash_frase(texto, voz):
+    """Genera un nombre de archivo único para una frase+voz."""
+    return hashlib.md5(f"{texto}|{voz}".encode()).hexdigest()[:16]
+
+
+def _ruta_cache(texto, voz):
+    """Devuelve la ruta del archivo cacheado para una frase."""
+    nombre = _hash_frase(texto, voz) + ".mp3"
+    return _CARPETA_CACHE_TTS / nombre
+
+
+def _precargar_cache():
+    """Genera archivos de audio en cache para las frases comunes."""
+    global _cache_audio
+    print(f"[TTS] Precargando cache de audio para voz '{VOZ}'...")
+    
+    for frase in _FRASES_PRECARGAR:
+        ruta = _ruta_cache(frase, VOZ)
+        if ruta.exists():
+            # Ya existe en disco, cargar a memoria
+            with open(ruta, "rb") as f:
+                _cache_audio[frase.lower()] = f.read()
+            continue
+        
+        # Generar con edge_tts y guardar
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            audio = loop.run_until_complete(_generar_audio_edge(frase))
+            loop.close()
+            
+            if audio:
+                with open(ruta, "wb") as f:
+                    f.write(audio)
+                _cache_audio[frase.lower()] = audio
+                print(f"[TTS]  ✓ Cacheado: {frase!r}")
+            else:
+                print(f"[TTS]  ✗ Falló: {frase!r}")
+        except Exception as e:
+            print(f"[TTS]  ✗ Error cacheando {frase!r}: {e}")
+    
+    print(f"[TTS] Cache listo: {len(_cache_audio)} frases precargadas")
+
+
+def _obtener_audio_cacheado(texto):
+    """Devuelve audio bytes si la frase está en cache, None si no."""
+    return _cache_audio.get(texto.lower().strip())
+
+
+async def _generar_audio_edge(texto):
+    """Genera audio con Edge TTS. Devuelve bytes o None."""
+    try:
+        communicate = edge_tts.Communicate(texto, voice=VOZ)
+        audio_data = b""
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio":
+                audio_data += chunk["data"]
+        return audio_data if audio_data else None
+    except Exception as e:
+        print(f"[TTS] Error generando audio con Edge: {e}")
+        return None
+
+
+# Precargar cache al importar el módulo (en segundo plano)
+threading.Thread(target=_precargar_cache, daemon=True, name="TTSCache").start()
+
+
+# =========================================================
+# ENFRIAMIENTO POST-TTS
+# =========================================================
+
+RECALIBRAR_TRAS_HABLAR = True
+
+_DEMORA_BASE_MS = 300
+_DEMORA_CONVERSACION_MS = 500
+_DEMORA_SUPERPOSICION_MS = 400
+
+
+def _calcular_demora_eco(hubo_superposicion=False, modo_escucha=None):
+    demora = _DEMORA_BASE_MS
+    try:
+        from voice import get_modo_escucha, ModoEscucha
+        if modo_escucha is None:
+            modo_escucha = get_modo_escucha()
+        if modo_escucha == ModoEscucha.CONVERSACION:
+            demora = max(demora, _DEMORA_CONVERSACION_MS)
+    except Exception:
+        pass
+    if hubo_superposicion:
+        demora += _DEMORA_SUPERPOSICION_MS
+    return demora / 1000.0
+
+
+# =========================================================
+# INICIALIZAR PYGAME MIXER
 # =========================================================
 
 pygame.mixer.init()
 
 # =========================================================
 # LOCK DE VOZ
-# FIX: hablar() no tenía ninguna protección contra llamadas
-# simultáneas desde distintos hilos. Mientras solo el hilo
-# principal hablaba, no importaba — pero con recordatorios.py
-# (un hilo daemon por recordatorio que llama a hablar() cuando
-# se cumple la hora) ahora sí puede pasar que el hilo principal
-# esté diciendo algo justo cuando un recordatorio se dispara.
-# pygame.mixer.music.load() de un hilo pisaría el audio que el
-# otro hilo acaba de cargar/empezar a reproducir.
-#
-# Con este Lock, si dos hilos llaman a hablar() al mismo tiempo,
-# el segundo simplemente espera a que el primero termine de
-# hablar antes de empezar — nunca se pisan, nunca se pierde un
-# aviso.
 # =========================================================
 
 _lock_voz = threading.Lock()
 
 # =========================================================
 # ÚLTIMO MENSAJE
-# NUEVO: guarda el último texto hablado, para poder repetirlo si el
-# usuario no llegó a escucharlo bien (ej. lo interrumpió el barge-in
-# sin querer, o había ruido de fondo justo en ese momento) — ver
-# ultimo_mensaje() y el comando "repite"/"¿qué dijiste?" en main.py.
 # =========================================================
 
 _ultimo_mensaje = None
 
 
 def ultimo_mensaje():
-    """Devuelve el último texto hablado por el asistente, o None si
-    todavía no habló nada en esta sesión."""
     return _ultimo_mensaje
 
 
 # =========================================================
-# RESPALDO SIN INTERNET (SAPI5 de Windows)
-# Edge TTS depende de un servicio de Microsoft que de vez en
-# cuando devuelve error 403 (problema conocido y reportado del
-# lado de ellos, no de este código — ver github.com/rany2/edge-tts).
-# Mientras eso pase (o si no hay internet), usar la voz local de
-# Windows evita que el asistente se quede completamente mudo,
-# aunque suene más robótica que la voz neuronal de Edge.
+# RESPALDO LOCAL (SAPI5/pyttsx3) — SOLO EN ERRORES GRAVES
 # =========================================================
 
 def _hablar_respaldo(texto):
+    """Último recurso si todo lo demás falla. Voz del sistema."""
     try:
         import pyttsx3
         motor = pyttsx3.init()
@@ -76,112 +211,96 @@ def _hablar_respaldo(texto):
         print("[TTS] Respaldo también falló:", e)
         return False
 
+
 # =========================================================
-# BARGE-IN (interrumpir al asistente hablando)
-# NUEVO: mientras el audio se reproduce, un hilo aparte vigila el
-# micrófono en ventanas cortas. Si detecta que el usuario empezó a
-# hablar, CORTA la reproducción de inmediato (en vez de esperar a
-# que termine la frase completa) y devuelve lo que se llegó a
-# escuchar — así el usuario no tiene que esperar a que el asistente
-# termine de hablar para poder decir algo.
-#
-# Se usa escuchar_rapido() (la misma función ya usada por
-# cancelacion.py, mismo patrón ya probado) en vez de acceso directo
-# al audio crudo del micrófono — es menos instantáneo (hasta ~0.5s
-# de retraso en detectar que empezaste a hablar, por el tamaño de la
-# ventana) pero muchísimo más simple y seguro, reusando
-# infraestructura ya validada en vez de construir algo nuevo de cero.
-#
-# IMPORTANTE: con parlantes (no auriculares), el propio micrófono
-# puede captar la voz del asistente saliendo por los parlantes, lo
-# cual puede autointerrumpir la reproducción — esto es un trade-off
-# consciente y conocido de priorizar reacción rápida sobre evitar
-# falsos positivos (ver la conversación de diseño): no hay forma de
-# eliminarlo del todo sin antes distinguir "es mi propia voz" de
-# "es el usuario", lo cual queda fuera del alcance de esta primera
-# versión.
+# REPRODUCIR AUDIO DESDE BYTES
 # =========================================================
 
-def _vigilar_interrupcion(evento_detener, resultado):
-    """
-    Corre en un hilo aparte mientras el audio se reproduce.
+def _reproducir_audio(audio_bytes):
+    """Reproduce audio desde bytes en memoria."""
+    try:
+        pygame.mixer.music.load(io.BytesIO(audio_bytes))
+        pygame.mixer.music.play()
+        while pygame.mixer.music.get_busy():
+            pygame.time.wait(50)
+        return True
+    except Exception as e:
+        print(f"[TTS] Error reproduciendo audio: {e}")
+        return False
 
-    FASE 1 — detección rápida: usa detectar_voz_breve() (ventanas de
-    ~0.3s, sin transcribir nada) en loop, repitiendo hasta que se
-    detecte energía de voz o el audio termine solo. Esto es lo que
-    permite cortar la reproducción casi de inmediato en vez de
-    esperar a que el usuario termine de decir una frase completa.
 
-    FASE 2 — una vez detectada la voz, se corta la reproducción
-    PRIMERO (pygame.mixer.music.stop()), y SOLO DESPUÉS se hace una
-    escucha completa normal (escuchar_rapido) para capturar qué dijo
-    el usuario realmente — ya sin el audio del TTS de fondo
-    compitiendo con su voz. Ese texto es lo que hablar() devuelve
-    como resultado de la interrupción.
-    """
+# =========================================================
+# ESCUCHA EN PARALELO (para interrupciones)
+# =========================================================
+
+UMBRAL_VAD_SUPERPONER = 0.6
+PHRASE_TIME_LIMIT_SUPERPOSICION = 10
+INTENTO_POST_TTS = True
+
+
+def _vigilar_interrupcion(evento_detener, resultado, info_superposicion):
     from voice import detectar_voz_breve, escuchar_rapido
-
     while not evento_detener.is_set():
         try:
-            hay_voz = detectar_voz_breve(timeout=1)
+            hay_voz = detectar_voz_breve(timeout=1, umbral=UMBRAL_VAD_SUPERPONER)
         except Exception:
             continue
-
         if evento_detener.is_set():
-            # el audio ya terminó solo mientras hacíamos esta
-            # detección — no es una interrupción real
             return
-
         if hay_voz:
-            pygame.mixer.music.stop()
-
+            info_superposicion["hubo"] = True
+            info_superposicion["timestamp_inicio"] = time.time()
             try:
-                texto = escuchar_rapido(timeout=2, phrase_time_limit=8)
+                texto = escuchar_rapido(
+                    timeout=2,
+                    phrase_time_limit=PHRASE_TIME_LIMIT_SUPERPOSICION
+                )
             except Exception:
                 texto = ""
-
+            info_superposicion["texto"] = texto or None
+            info_superposicion["timestamp_fin"] = time.time()
             resultado[0] = texto or None
             return
 
+
 # =========================================================
-# HABLAR
+# HABLAR PRINCIPAL — CACHE PRIMERO, EDGE TTS DESPUÉS
 # =========================================================
 
 async def _hablar_async(texto, permitir_interrupcion):
+    # FIX: intentar cache primero (instantáneo, misma voz)
+    audio_cacheado = _obtener_audio_cacheado(texto)
+    if audio_cacheado:
+        print(f"[TTS] Cache hit: {texto!r}")
+        _reproducir_audio(audio_cacheado)
+        # No hay interrupción en cache (reproducción síncrona simple)
+        # pero sí recalibramos
+        if RECALIBRAR_TRAS_HABLAR:
+            await asyncio.sleep(_calcular_demora_eco())
+            try:
+                from voice import recalibrar
+                recalibrar()
+            except Exception:
+                pass
+        return None
 
-    communicate = edge_tts.Communicate(texto, voice=VOZ)
-
-    audio_data = b""
-
-    async for chunk in communicate.stream():
-        if chunk["type"] == "audio":
-            audio_data += chunk["data"]
-
+    # No está en cache → generar con Edge TTS
+    audio_data = await _generar_audio_edge(texto)
+    
     if not audio_data:
         raise RuntimeError("Edge TTS no devolvió audio")
 
-    pygame.mixer.music.load(io.BytesIO(audio_data))
-    pygame.mixer.music.play()
-
-    # FIX: pygame.mixer.music.play() inicia la reproducción de forma
-    # asíncrona — toma unos milisegundos en arrancar de verdad. Sin
-    # este pequeño margen, el primer chequeo de get_busy() de abajo
-    # podía ocurrir ANTES de que el audio empezara a sonar, devolver
-    # False de inmediato, y el while se saltaba sin esperar nada. El
-    # código terminaba "exitosamente" sin haber esperado a que el
-    # audio realmente se reprodujera — esto causaba que, después del
-    # primer hablar() (que por timing sí alcanzaba a arrancar), los
-    # siguientes se cortaran o ni llegaran a sonar.
-    await asyncio.sleep(0.1)
+    _reproducir_audio(audio_data)
 
     resultado_interrupcion = [None]
-    hilo_vigilancia         = None
-    evento_detener          = threading.Event()
+    info_superposicion = {"hubo": False}
+    hilo_vigilancia = None
+    evento_detener = threading.Event()
 
     if permitir_interrupcion:
         hilo_vigilancia = threading.Thread(
             target=_vigilar_interrupcion,
-            args=(evento_detener, resultado_interrupcion),
+            args=(evento_detener, resultado_interrupcion, info_superposicion),
             daemon=True
         )
         hilo_vigilancia.start()
@@ -189,51 +308,37 @@ async def _hablar_async(texto, permitir_interrupcion):
     while pygame.mixer.music.get_busy():
         pygame.time.wait(50)
 
-    # el audio ya terminó (sea porque sonó completo, o porque el
-    # hilo de vigilancia lo cortó) — se avisa al hilo de vigilancia
-    # para que no siga escuchando de más si todavía no detectó nada
     evento_detener.set()
 
-    # FIX: sin este join(), el hilo principal podía seguir de
-    # inmediato hacia la siguiente llamada a escuchar() (en main.py)
-    # MIENTRAS el hilo de vigilancia todavía estaba a mitad de un
-    # `with sr.Microphone()` (detectar_voz_breve puede tardar hasta
-    # ~1s en su propio listen() con timeout). Dos hilos abriendo
-    # sr.Microphone() al mismo tiempo causaba un crash real:
-    # "Audio source must be entered before listening" / "'NoneType'
-    # object has no attribute 'close'" — el stream de PyAudio queda
-    # en None cuando dos aperturas se pisan.
-    #
-    # Es el mismo tipo de problema (y la misma solución) que ya
-    # resolvimos en cancelacion.py con detener_cancelacion(): esperar
-    # a que el hilo realmente termine y suelte el micrófono antes de
-    # devolver el control, en vez de asumir que set() es instantáneo.
-    # El timeout del join da margen de sobra (detectar_voz_breve
-    # nunca debería tardar más de ~1.3s en notar la bandera y salir).
     if hilo_vigilancia is not None and hilo_vigilancia.is_alive():
         hilo_vigilancia.join(timeout=3)
+
+    if (INTENTO_POST_TTS
+        and info_superposicion["hubo"]
+        and not resultado_interrupcion[0]):
+        try:
+            from voice import escuchar_rapido
+            print("[TTS] Superposición sin texto claro, intentando post-TTS...")
+            texto_post = escuchar_rapido(timeout=2, phrase_time_limit=5)
+            if texto_post:
+                resultado_interrupcion[0] = texto_post
+                print(f"[TTS] Segundo intento exitoso: {texto_post!r}")
+        except Exception:
+            pass
+
+    if RECALIBRAR_TRAS_HABLAR:
+        demora = _calcular_demora_eco(hubo_superposicion=info_superposicion["hubo"])
+        await asyncio.sleep(demora)
+        try:
+            from voice import recalibrar
+            recalibrar()
+        except Exception as e:
+            log.warning(f"No se pudo recalibrar: {e}")
 
     return resultado_interrupcion[0]
 
 
 def hablar(texto, permitir_interrupcion=False):
-    """
-    Habla el texto dado. Devuelve None normalmente.
-
-    Si permitir_interrupcion=True, mientras el audio suena se vigila
-    el micrófono — si el usuario empieza a hablar, la reproducción
-    se corta de inmediato y hablar() devuelve el texto transcrito de
-    esa interrupción, en vez de None. El código que llama a hablar()
-    puede revisar ese valor para usarlo como el siguiente comando en
-    vez de esperar a escuchar() de nuevo.
-
-    Por defecto permitir_interrupcion es False — mensajes cortos
-    (confirmaciones, "Cancelado", etc) no se benefician de esto y
-    activar la vigilancia para cada mensaje sumaría carga e
-    incertidumbre sin necesidad. Se activa explícitamente solo en
-    los mensajes donde más se siente la espera (ver main.py).
-    """
-
     global _ultimo_mensaje
     _ultimo_mensaje = texto
 
@@ -243,19 +348,14 @@ def hablar(texto, permitir_interrupcion=False):
         try:
             return asyncio.run(_hablar_async(texto, permitir_interrupcion))
         except Exception as e:
-            print("[TTS] Error con Edge TTS, usando respaldo local:", e)
-            # FIX/NUEVO: Edge TTS fallando es un caso ya conocido y con
-            # respaldo diseñado (ver _hablar_respaldo arriba) — no es
-            # grave por sí solo, así que se registra como warning (útil
-            # para notar si pasa muy seguido, sin tratarlo como un
-            # error grave cada vez). Lo que SÍ es importante y antes
-            # NO quedaba registrado en ningún lado es que el respaldo
-            # local TAMBIÉN falle — en ese caso el asistente se queda
-            # completamente mudo en silencio, sin ningún rastro de qué
-            # mensaje se perdió ni por qué, ni en consola (la única
-            # pista era la del log de Edge TTS) ni en el log de errores.
-            log.warning(f"Edge TTS falló, usando respaldo local. Texto: '{texto}'. Motivo: {e}")
+            print("[TTS] Error con Edge TTS, usando respaldo:", e)
+            log.warning(f"Edge TTS falló. Texto: '{texto}'. Motivo: {e}")
+            # FIX: en error, intentar reproducir desde cache si existe
+            audio_cacheado = _obtener_audio_cacheado(texto)
+            if audio_cacheado:
+                print("[TTS] Usando cache de respaldo por error")
+                _reproducir_audio(audio_cacheado)
+                return None
             if not _hablar_respaldo(texto):
-                log.error(f"El asistente quedó MUDO — fallaron Edge TTS Y el "
-                          f"respaldo local para el mensaje: '{texto}'")
+                log.error(f"El asistente quedó MUDO para: '{texto}'")
             return None

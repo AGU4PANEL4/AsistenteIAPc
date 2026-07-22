@@ -3,7 +3,7 @@
 ; ============================================================
 
 #define MyAppName      "AsistenteIA"
-#define MyAppVersion   "1.2.2"
+#define MyAppVersion   "1.3.0"
 #define MyAppPublisher "David"
 #define MyAppExeName   "AsistenteIA.exe"
 #define MyDistDir      "dist\AsistenteIA"
@@ -71,7 +71,15 @@ WizardStyle=modern
 ; Descomenta estas líneas si tenés imágenes de branding:
 ; WizardImageFile=installer_banner.bmp        ; 164x314 px
 ; WizardSmallImageFile=installer_logo.bmp     ; 55x55 px
-; SetupIconFile=icono.ico
+
+; NUEVO: ícono del propio Setup.exe (el instalador, no la app) — se
+; ve en el Explorador de Windows antes de correrlo, y en la barra de
+; título/taskbar mientras el instalador está abierto. Es un ícono
+; DISTINTO del que lleva AsistenteIA.exe (ver asistente.spec, icon=
+; "asistente-ia.ico") — Inno Setup no reutiliza uno para el otro
+; automáticamente, hace falta declarar los dos por separado. El
+; archivo debe estar en la misma carpeta que este .iss al compilar.
+SetupIconFile=asistente-ia.ico
 
 ; ── comportamiento ──────────────────────────────────────────
 ; Muestra la licencia y el README si existen en el proyecto
@@ -82,10 +90,6 @@ DisableReadyPage=no
 ShowLanguageDialog=no
 AlwaysShowDirOnReadyPage=yes
 AlwaysShowGroupOnReadyPage=no
-
-; ── menú inicio ─────────────────────────────────────────────
-; Cámbialo si tienes un .ico para el instalador
-; SetupIconFile=icono.ico
 
 ; ============================================================
 [Languages]
@@ -130,6 +134,11 @@ Source: "{#MyDistDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs 
 
 ; ============================================================
 [Icons]
+; NUEVO: no hace falta declarar IconFilename acá — AsistenteIA.exe ya
+; trae el ícono embebido de fábrica (ver asistente.spec, icon=
+; "asistente-ia.ico"), así que estos accesos directos lo heredan
+; automáticamente del propio .exe al que apuntan.
+
 ; Menú inicio
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 

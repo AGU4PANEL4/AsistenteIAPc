@@ -59,6 +59,30 @@ datos_certifi = collect_data_files("certifi")
 
 datas = [
     (str(RUTA_SR), "speech_recognition"),
+    # NUEVO: ícono de la app como archivo suelto junto al .exe (no
+    # solo embebido en el propio .exe vía icon= más abajo) — lo
+    # necesita icono_app.py/splash.py para fijar el ícono de la
+    # VENTANA en tiempo de ejecución (root.iconbitmap/iconphoto),
+    # algo que el ícono embebido del .exe no cubre por sí solo. El
+    # segundo elemento de la tupla ("." ) pone el archivo en la raíz
+    # de la carpeta dist/AsistenteIA, junto a AsistenteIA.exe — mismo
+    # nivel que sys.executable, que es justo donde icono_app.py busca
+    # cuando sys.frozen es True.
+    ("asistente-ia.ico", "."),
+    ("asistente-ia.png", "."),
+    # FIX: la carpeta web/ (panel.html, panel.css, panel.js) que usa
+    # main_web.py vía pywebview NO se estaba copiando — PyInstaller
+    # solo empaqueta código Python por análisis de imports, nunca
+    # HTML/CSS/JS sueltos, así que hay que declararlos a mano igual
+    # que los íconos de arriba. Sin esto, ARCHIVO_PANEL apunta a una
+    # ruta que no existe dentro de dist/AsistenteIA y pywebview tira
+    # 404 Not Found al intentar cargar panel.html (funciona en
+    # desarrollo solo porque ahí la carpeta web/ sí está en disco
+    # junto a main.py). El primer elemento es la carpeta de ORIGEN
+    # relativa a este .spec, el segundo es el nombre de carpeta
+    # DESTINO dentro de dist/AsistenteIA — deben coincidir con
+    # os.path.join(BASE_DIR, "web", "panel.html") en main_web.py.
+    ("web", "web"),
 ] + datos_tokenizers + datos_faster_whisper + datos_certifi
 
 hiddenimports = [
@@ -209,7 +233,16 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=None,  # cámbialo a "ruta\a\icono.ico" si tienes uno
+    # NUEVO: ícono del .exe compilado — se ve en el propio archivo
+    # .exe (Explorador de Windows), en la barra de tareas mientras
+    # corre, y es lo que heredan automáticamente los accesos directos
+    # que instalador.iss crea apuntando a este mismo .exe (Inno Setup
+    # no necesita ningún ícono declarado aparte para el menú
+    # inicio/escritorio si el .exe ya lo trae embebido). Ruta
+    # relativa a la carpeta del proyecto — asistente-ia.ico debe
+    # copiarse junto a main.py antes de empaquetar (mismo lugar que
+    # requirements.txt).
+    icon="asistente-ia.ico",
 )
 
 coll = COLLECT(

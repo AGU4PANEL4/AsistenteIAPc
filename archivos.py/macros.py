@@ -30,12 +30,13 @@ from difflib import SequenceMatcher
 
 from logger import log
 from voz_utils import UMBRAL_SIMILITUD_DIFUSA
+from rutas_datos import CARPETA_DATOS
 
 # =========================================================
 # ARCHIVO
+# NUEVO: CARPETA_DATOS ahora viene de rutas_datos.py (multiplataforma).
 # =========================================================
 
-CARPETA_DATOS  = Path(os.environ["LOCALAPPDATA"]) / "AsistenteIA"
 ARCHIVO_MACROS = CARPETA_DATOS / "macros.json"
 
 _lock    = threading.Lock()
@@ -66,15 +67,27 @@ def _cargar():
 def _guardar():
     CARPETA_DATOS.mkdir(parents=True, exist_ok=True)
 
+    # FIX: antes el snapshot de `data` se tomaba DENTRO del lock, pero
+    # la escritura a disco (open/json.dump) quedaba FUERA — el lock
+    # solo protegía la lectura en memoria, no la escritura real. Si
+    # guardar_macro() y eliminar_macro() se llamaban casi al mismo
+    # tiempo desde hilos distintos, podían entrelazarse: hilo A toma
+    # snapshot viejo, hilo B toma snapshot nuevo y escribe primero,
+    # hilo A escribe después con su snapshot viejo — pisando en disco
+    # el cambio que B acababa de guardar, aunque en memoria todo
+    # estuviera bien. Mismo bug ya documentado y arreglado en
+    # temporizadores.py y recordatorios.py, que había quedado sin
+    # aplicar acá. Ahora la escritura a disco también ocurre DENTRO
+    # del lock, serializando completamente los guardados.
     with _lock:
         data = dict(_macros)
 
-    try:
-        with open(ARCHIVO_MACROS, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=4, ensure_ascii=False)
-    except Exception as e:
-        print("[Macros] Error guardando:", e)
-        log.exception("Error guardando macros.json")
+        try:
+            with open(ARCHIVO_MACROS, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=4, ensure_ascii=False)
+        except Exception as e:
+            print("[Macros] Error guardando:", e)
+            log.exception("Error guardando macros.json")
 
 # =========================================================
 # OPERACIONES

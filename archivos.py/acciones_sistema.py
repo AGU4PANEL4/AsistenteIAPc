@@ -11,7 +11,10 @@ archivo de 1300+ líneas que mezclaba temas muy distintos entre sí.
 """
 
 import re
+import subprocess
 
+from logger import log
+from plataforma import es_linux
 from voice import escuchar, escuchar_confirmacion
 from tts import hablar
 from startup import (
@@ -421,12 +424,15 @@ def ayuda_accion(valor=None):
     mensaje = (
         "Puedo ayudarte con varias cosas: "
         "abrir, cerrar, minimizar o maximizar apps y juegos; "
+        "cerrar todos los juegos abiertos de una vez, o activar el "
+        "modo estudio para eso mismo más no molestar juntos; "
         "controlar música y video (pausar, siguiente, volumen); "
         "recordatorios y temporizadores; "
         "macros para encadenar varias acciones con un solo comando; "
         "alias para que reconozca mejor los nombres que uses; "
         "modo no molestar; "
         "inicio automático con Windows; "
+        "apagar, reiniciar, suspender o bloquear la PC; "
         "y buscar actualizaciones del asistente. "
         "También podés preguntarme cosas y charlar normalmente. "
         "Decime, por ejemplo, \"crea una macro\" o \"registra un alias\" "
@@ -460,3 +466,289 @@ def conversion_accion(valor=None):
         return False, "No entendí esa conversión"
 
     return True, resultado
+
+# =========================================================
+# COMANDOS DE SISTEMA — apagar, reiniciar, suspender, bloquear
+# NUEVO: control básico de energía de Windows por voz.
+#
+# Apagar y reiniciar son ACCIONES DESTRUCTIVAS (se pierde cualquier
+# trabajo sin guardar) — en vez de un flujo de confirmación por voz
+# (que depende de que el reconocimiento de "sí"/"no" acierte, algo
+# que este mismo proyecto documentó fallando en varios lugares — ver
+# session.py/voz_utils.py), se usa el mecanismo NATIVO de Windows:
+# "shutdown /s /t N" programa el apagado con N segundos de margen
+# ANTES de ejecutarse de verdad, cancelable con "shutdown /a". El
+# asistente avisa el margen en voz alta y da una ventana real para
+# arrepentirse ("cancela el apagado"), sin necesitar un segundo turno
+# de escucha que podría fallar o malinterpretarse.
+#
+# Suspender y bloquear NO se consideran destructivos de la misma
+# forma (no se pierde nada, la sesión de Windows sigue intacta al
+# volver) — se ejecutan directo, sin margen de cancelación.
+#
+# A propósito, ninguna de las frases reconocidas para suspender usa
+# "dormir"/"duerme" — esas palabras ya están tomadas por el modo
+# dormido DEL ASISTENTE (ver es_dormir/DESPIERTA_WORD en session.py),
+# que es algo completamente distinto (silenciar la wake word, no
+# tocar el hardware) — mezclar el mismo vocabulario para dos cosas
+# distintas sería confuso y, peor, arriesgaría que uno de los dos
+# matchee por error el comando del otro.
+# =========================================================
+
+# =========================================================
+# COMANDOS DE SISTEMA — apagar, reiniciar, suspender, bloquear
+# NUEVO: control básico de energía por voz, multiplataforma.
+#
+# Apagar y reiniciar son ACCIONES DESTRUCTIVAS (se pierde cualquier
+# trabajo sin guardar) — en vez de un flujo de confirmación por voz
+# (que depende de que el reconocimiento de "sí"/"no" acierte, algo
+# que este mismo proyecto documentó fallando en varios lugares — ver
+# session.py/voz_utils.py), se usa el mecanismo NATIVO de cada
+# sistema operativo para programar la acción con un margen de
+# segundos ANTES de ejecutarse de verdad, cancelable durante ese
+# margen. El asistente avisa el margen en voz alta y da una ventana
+# real para arrepentirse ("cancela el apagado"), sin necesitar un
+# segundo turno de escucha que podría fallar o malinterpretarse.
+#
+# Suspender y bloquear NO se consideran destructivos de la misma
+# forma (no se pierde nada, la sesión sigue intacta al volver) — se
+# ejecutan directo, sin margen de cancelación.
+#
+# A propósito, ninguna de las frases reconocidas para suspender usa
+# "dormir"/"duerme" — esas palabras ya están tomadas por el modo
+# dormido DEL ASISTENTE (ver es_dormir/DESPIERTA_WORD en session.py),
+# que es algo completamente distinto (silenciar la wake word, no
+# tocar el hardware) — mezclar el mismo vocabulario para dos cosas
+# distintas sería confuso y, peor, arriesgaría que uno de los dos
+# matchee por error el comando del otro.
+# =========================================================
+
+DEMORA_APAGADO_SEGUNDOS = 10
+
+# Nombre fijo de la unidad systemd transitoria usada en Linux para
+# programar el apagado/reinicio — necesario para poder CANCELARLA
+# después por nombre (ver _cancelar_apagado_linux), el equivalente
+# de "shutdown /a" en Windows.
+_UNIDAD_APAGADO_LINUX = "asistente-apagado"
+
+
+def apagar_pc(valor=None):
+    if es_linux():
+        return _programar_apagado_linux("poweroff")
+    return _apagar_pc_windows()
+
+
+def reiniciar_pc(valor=None):
+    if es_linux():
+        return _programar_apagado_linux("reboot")
+    return _reiniciar_pc_windows()
+
+
+def cancelar_apagado(valor=None):
+    if es_linux():
+        return _cancelar_apagado_linux()
+    return _cancelar_apagado_windows()
+
+
+def suspender_pc(valor=None):
+    if es_linux():
+        return _suspender_pc_linux()
+    return _suspender_pc_windows()
+
+
+def bloquear_pc(valor=None):
+    if es_linux():
+        return _bloquear_pc_linux()
+    return _bloquear_pc_windows()
+
+
+# =========================================================
+# WINDOWS
+# =========================================================
+
+def _apagar_pc_windows():
+    try:
+        subprocess.run(
+            ["shutdown", "/s", "/t", str(DEMORA_APAGADO_SEGUNDOS)],
+            capture_output=True,
+        )
+        return True, (
+            f"Apagando la PC en {DEMORA_APAGADO_SEGUNDOS} segundos. "
+            "Decí \"cancela el apagado\" si fue un error"
+        )
+    except Exception:
+        log.exception("Error apagando la PC")
+        return False, "No pude apagar la PC"
+
+
+def _reiniciar_pc_windows():
+    try:
+        subprocess.run(
+            ["shutdown", "/r", "/t", str(DEMORA_APAGADO_SEGUNDOS)],
+            capture_output=True,
+        )
+        return True, (
+            f"Reiniciando la PC en {DEMORA_APAGADO_SEGUNDOS} segundos. "
+            "Decí \"cancela el apagado\" si fue un error"
+        )
+    except Exception:
+        log.exception("Error reiniciando la PC")
+        return False, "No pude reiniciar la PC"
+
+
+def _cancelar_apagado_windows():
+    """
+    "shutdown /a" devuelve código de salida distinto de 0 si no había
+    ningún apagado pendiente que cancelar — se usa eso para
+    distinguir "cancelado con éxito" de "no había nada que cancelar"
+    (ej. alguien dice esto sin haber pedido apagar antes), en vez de
+    reportar éxito en ambos casos por igual.
+    """
+    resultado = subprocess.run(["shutdown", "/a"], capture_output=True)
+    if resultado.returncode == 0:
+        return True, "Cancelé el apagado"
+    return False, "No había ningún apagado pendiente para cancelar"
+
+
+def _suspender_pc_windows():
+    try:
+        subprocess.run(
+            ["rundll32.exe", "powrprof.dll,SetSuspendState", "0,1,0"],
+            capture_output=True,
+        )
+        return True, "Suspendiendo la PC"
+    except Exception:
+        log.exception("Error suspendiendo la PC")
+        return False, "No pude suspender la PC"
+
+
+def _bloquear_pc_windows():
+    try:
+        import ctypes
+        ctypes.windll.user32.LockWorkStation()
+        return True, "Bloqueando la PC"
+    except Exception:
+        log.exception("Error bloqueando la PC")
+        return False, "No pude bloquear la PC"
+
+
+# =========================================================
+# LINUX
+# NUEVO: requiere systemd (la inmensa mayoría de distros de
+# escritorio modernas — Ubuntu, Fedora, Debian, Arch, Mint, etc. —
+# lo usan por defecto). En una distro sin systemd (ej. Void Linux con
+# runit), estas funciones fallan de forma controlada y devuelven
+# (False, mensaje) en vez de romper el asistente.
+# =========================================================
+
+def _programar_apagado_linux(accion):
+    """
+    accion: "poweroff" o "reboot". Usa systemd-run para programar la
+    acción DEMORA_APAGADO_SEGUNDOS en el futuro, con un nombre de
+    unidad FIJO — así se puede cancelar después por nombre (ver
+    _cancelar_apagado_linux), igual que "shutdown /a" hace en
+    Windows.
+
+    "systemd-run --on-active=Ns" crea un timer transitorio que
+    dispara el comando dado UNA sola vez, N segundos después de
+    creado — el equivalente más directo en systemd al margen de
+    "shutdown /t N" de Windows. El propio comando `shutdown` de
+    Linux (de util-linux) solo admite MINUTOS como unidad mínima de
+    margen, insuficiente para los ~10 segundos que queremos acá.
+    """
+    try:
+        resultado = subprocess.run(
+            [
+                "systemd-run", f"--unit={_UNIDAD_APAGADO_LINUX}",
+                f"--on-active={DEMORA_APAGADO_SEGUNDOS}",
+                "systemctl", accion,
+            ],
+            capture_output=True, text=True,
+        )
+
+        if resultado.returncode != 0:
+            log.error(f"systemd-run para {accion} falló: {resultado.stderr.strip()}")
+            verbo = "apagar" if accion == "poweroff" else "reiniciar"
+            return False, f"No pude {verbo} la PC"
+
+        verbo = "Apagando" if accion == "poweroff" else "Reiniciando"
+        return True, (
+            f"{verbo} la PC en {DEMORA_APAGADO_SEGUNDOS} segundos. "
+            "Decí \"cancela el apagado\" si fue un error"
+        )
+    except Exception:
+        log.exception(f"Error programando {accion} en Linux")
+        verbo = "apagar" if accion == "poweroff" else "reiniciar"
+        return False, f"No pude {verbo} la PC"
+
+
+def _cancelar_apagado_linux():
+    resultado = subprocess.run(
+        ["systemctl", "stop", f"{_UNIDAD_APAGADO_LINUX}.timer"],
+        capture_output=True,
+    )
+    if resultado.returncode == 0:
+        return True, "Cancelé el apagado"
+    return False, "No había ningún apagado pendiente para cancelar"
+
+
+def _suspender_pc_linux():
+    try:
+        resultado = subprocess.run(["systemctl", "suspend"], capture_output=True)
+        if resultado.returncode != 0:
+            return False, "No pude suspender la PC"
+        return True, "Suspendiendo la PC"
+    except Exception:
+        log.exception("Error suspendiendo la PC")
+        return False, "No pude suspender la PC"
+
+
+def _bloquear_pc_linux():
+    """
+    No hay UN comando universal para bloquear la pantalla en Linux —
+    depende del entorno de escritorio. Se prueba una cascada de
+    mecanismos estándar, del más ampliamente soportado al más
+    específico, deteniéndose en el primero que funcione:
+
+      1. "loginctl lock-session" — estándar de systemd-logind, lo
+         escuchan GNOME y KDE modernos por defecto.
+      2. "xdg-screensaver lock" — herramienta de freedesktop.org
+         pensada específicamente para ser agnóstica del entorno de
+         escritorio.
+      3. Interfaz D-Bus estándar org.freedesktop.ScreenSaver — usada
+         por entornos que no atienden ninguno de los dos anteriores.
+
+    Si ninguno funciona (entorno de escritorio no estándar, o los
+    binarios no están instalados), se reporta el fallo en vez de
+    fingir éxito.
+    """
+    intentos = [
+        ["loginctl", "lock-session"],
+        ["xdg-screensaver", "lock"],
+    ]
+
+    for comando in intentos:
+        try:
+            resultado = subprocess.run(comando, capture_output=True, timeout=5)
+            if resultado.returncode == 0:
+                return True, "Bloqueando la PC"
+        except Exception:
+            continue
+
+    try:
+        resultado = subprocess.run(
+            [
+                "dbus-send", "--type=method_call",
+                "--dest=org.freedesktop.ScreenSaver",
+                "/org/freedesktop/ScreenSaver",
+                "org.freedesktop.ScreenSaver.Lock",
+            ],
+            capture_output=True, timeout=5,
+        )
+        if resultado.returncode == 0:
+            return True, "Bloqueando la PC"
+    except Exception:
+        pass
+
+    log.error("No se pudo bloquear la pantalla — ningún mecanismo conocido funcionó")
+    return False, "No pude bloquear la PC"

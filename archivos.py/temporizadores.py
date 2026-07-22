@@ -7,13 +7,13 @@ from pathlib import Path
 
 from tts import hablar
 from tiempo_utils import parsear_duracion
+from rutas_datos import CARPETA_DATOS
 
 # =========================================================
 # ARCHIVO
-# Mismo patrón que recordatorios.py / memory.py / aliases.py.
+# NUEVO: CARPETA_DATOS ahora viene de rutas_datos.py (multiplataforma).
 # =========================================================
 
-CARPETA_DATOS         = Path(os.environ["LOCALAPPDATA"]) / "AsistenteIA"
 ARCHIVO_TEMPORIZADORES = CARPETA_DATOS / "temporizadores.json"
 
 # =========================================================

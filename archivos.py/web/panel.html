@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>AsistenteIA</title>
+<link rel="stylesheet" href="panel.css">
+<base target="_blank">
+</head>
+<body>
+  <div id="panel">
+
+    <!-- ORBE GRANDE -->
+    <div id="orbe-wrap">
+      <div id="orbe-circulo">
+        <svg id="orbe-svg" viewBox="0 0 96 96">
+          <!-- Círculo base -->
+          <circle id="orbe-base" cx="48" cy="48" r="24"
+                  fill="#10262c" stroke="#1c3a3f" stroke-width="2"/>
+
+          <!-- Ojos abiertos -->
+          <circle id="ojo-izq" cx="39" cy="45" r="2.5" fill="#3a5a5c"/>
+          <circle id="ojo-der" cx="57" cy="45" r="2.5" fill="#3a5a5c"/>
+
+          <!-- Ojos cerrados (ocultos) -->
+          <line id="ojo-izq-cerrado" x1="36" y1="45" x2="42" y2="45"
+                stroke="#3a5a5c" stroke-width="2" stroke-linecap="round" style="display:none"/>
+          <line id="ojo-der-cerrado" x1="54" y1="45" x2="60" y2="45"
+                stroke="#3a5a5c" stroke-width="2" stroke-linecap="round" style="display:none"/>
+
+          <!-- Boca neutra -->
+          <line id="boca-neutra" x1="44" y1="55" x2="52" y2="55"
+                stroke="#3a5a5c" stroke-width="2" stroke-linecap="round"/>
+
+          <!-- Boca hablando (oculta) -->
+          <path id="boca-hablando" d="M 42 53 Q 48 59 54 53"
+                fill="none" stroke="#3a5a5c" stroke-width="2" stroke-linecap="round"
+                style="display:none"/>
+
+          <!-- Boca escuchando (oculta) -->
+          <circle id="boca-escuchando" cx="48" cy="55" r="3"
+                  fill="#3a5a5c" style="display:none"/>
+
+          <!-- Boca dormido (oculta) -->
+          <ellipse id="boca-dormido" cx="48" cy="55" rx="1.5" ry="1.5"
+                   fill="#8b9ae8" style="display:none; opacity:0.5"/>
+
+          <!-- Z flotantes (ocultas) -->
+          <g id="z-flotantes" style="display:none">
+            <text id="z1" x="64" y="30" font-family="Segoe UI, sans-serif" font-size="8"
+                  font-weight="bold" fill="#8b9ae8" text-anchor="middle" opacity="0">z</text>
+            <text id="z2" x="72" y="24" font-family="Segoe UI, sans-serif" font-size="10"
+                  font-weight="bold" fill="#8b9ae8" text-anchor="middle" opacity="0">z</text>
+          </g>
+
+          <!-- Indicador de no molestar (oculto) -->
+          <g id="dnd-indicador" style="display:none">
+            <circle cx="69" cy="27" r="8" fill="#ff5566" stroke="#0b1a1f" stroke-width="2"/>
+            <line x1="65" y1="27" x2="73" y2="27" stroke="#0b1a1f" stroke-width="3" stroke-linecap="round"/>
+          </g>
+        </svg>
+      </div>
+
+      <div id="orbe-estado-texto">Inactivo</div>
+      <div id="orbe-sub">— · jarvis</div>
+    </div>
+
+    <!-- HEADER -->
+    <div id="header">
+      <div id="mini-orbe" onclick="pywebview.api.colapsar()">
+        <svg viewBox="0 0 24 24">
+          <circle class="ojo" id="mini-ojo-izq" cx="7"  cy="11" r="1.6"/>
+          <circle class="ojo" id="mini-ojo-der" cx="15" cy="11" r="1.6"/>
+          <path class="boca" id="mini-boca" d="M 8 17 Q 11 19 14 17"/>
+        </svg>
+      </div>
+      <div id="header-textos">
+        <div id="header-modo">Inactivo</div>
+        <div id="header-sub">— · jarvis</div>
+      </div>
+      <div id="header-motor">Groq</div>
+      <button onclick="pywebview.api.minimizar()">–</button>
+      <button onclick="pywebview.api.cerrar_app()">×</button>
+    </div>
+
+    <!-- MÉTRICAS -->
+    <div id="metricas">
+      <div class="metrica"><div class="lbl">wake word</div><div class="val" id="m-wake">jarvis</div></div>
+      <div class="metrica"><div class="lbl">motor</div><div class="val" id="m-motor">Groq</div></div>
+      <div class="metrica"><div class="lbl">no molestar</div><div class="val" id="m-dnd">off</div></div>
+    </div>
+
+    <!-- CATEGORÍAS -->
+    <div id="categorias"></div>
+
+    <!-- HISTORIAL -->
+    <div id="historial-wrap">
+      <div id="historial-titulo">Historial</div>
+      <div id="historial-lista"><div class="hist-vacio">Todavía no hay comandos.<br>Decí "jarvis" para empezar.</div></div>
+    </div>
+
+    <!-- OVERLAY + PANEL FLOTANTE -->
+    <div id="overlay" onclick="cerrarFlotante()"></div>
+    <div id="flotante">
+      <div id="flotante-header">
+        <div id="flotante-titulo">—</div>
+        <button id="flotante-cerrar" onclick="cerrarFlotante()">×</button>
+      </div>
+      <div class="flotante-lista" id="flotante-lista"></div>
+    </div>
+
+  </div>
+  <script src="panel.js"></script>
+</body>
+</html>

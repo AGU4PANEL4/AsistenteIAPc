@@ -63,9 +63,22 @@ def normalizar(comando):
     comando = re.sub(r"[¡!¿?]", "", comando)
     comando = re.sub(r"\s+", " ", comando).strip()
 
+    # FIX: antes esto era un reemplazo de SUBSTRING simple
+    # (`error in comando` + `comando.replace(...)`), sin respetar
+    # límites de palabra. Eso corrompía cualquier comando donde una
+    # clave de CORRECCIONES apareciera como PREFIJO de una palabra
+    # más larga — el caso real encontrado: "cierra lo" (pensada para
+    # corregir "cierra lo" mal transcrito → "ciérralo") también hacía
+    # match dentro de "cierra LOS juegos", conviertiéndolo en
+    # "ciérraLOS juegos" (una palabra sin sentido), porque "cierra lo"
+    # es literalmente un substring de "cierra los". Mismo problema
+    # aplica a "abre lo" vs "abre los...". Ahora se usa \b (límite de
+    # palabra) en ambos extremos, así "cierra lo" solo matchea cuando
+    # "lo" es una palabra completa por sí sola, nunca el prefijo de
+    # "los"/"lote"/cualquier otra palabra que continúe después.
     for error, correcto in CORRECCIONES.items():
-        if error in comando:
-            comando = comando.replace(error, correcto)
+        comando = re.sub(rf"\b{re.escape(error)}\b", correcto, comando)
+
     return comando
 
 # =========================================================
@@ -511,8 +524,16 @@ def detectar_intent(comando):
     # separador en cualquier posición relativa al tiempo.
     # =====================================================
 
+    # FIX/NUEVO: antes exigía literalmente "ponme un recordatorio"
+    # (con "me") — decir "pon un recordatorio..." (sin "me", una
+    # variante igual de natural en español) no coincidía con nada acá
+    # y terminaba cayendo hasta el final del pipeline, donde matchea
+    # el prefijo genérico "pon " de ABRIR (ver más abajo): el
+    # asistente intentaba "abrir una app" llamada literalmente el
+    # resto de la frase ("un recordatorio a las 3 que compre pan") en
+    # vez de crear el recordatorio. pon(?:me)? acepta ambas formas.
     VERBOS_RECORDATORIO = (
-        r"recu[ée]rdame|ponme\s+un\s+recordatorio|"
+        r"recu[ée]rdame|pon(?:me)?\s+un\s+recordatorio|"
         r"crea(?:r)?\s+un?\s+recordatorio|crea(?:r)?\s+recordatorio"
     )
 
@@ -561,7 +582,7 @@ def detectar_intent(comando):
     # =====================================================
 
     VERBOS_REC = (
-        r"recu[ée]rdame|ponme\s+un\s+recordatorio\s+recurrente|"
+        r"recu[ée]rdame|pon(?:me)?\s+un\s+recordatorio\s+recurrente|"
         r"crea(?:r)?\s+un?\s+recordatorio\s+recurrente"
     )
 
@@ -884,6 +905,115 @@ def detectar_intent(comando):
         # recortar la frase disparadora primero.
         minutos = _extraer_minutos_no_molestar(comando)
         return "activar_no_molestar", str(minutos)
+
+    # =====================================================
+    # MODO ESTUDIO / ENFOQUE
+    # NUEVO: cierra todos los juegos detectados corriendo (ver
+    # cerrar_juegos_abiertos en acciones_apps.py — detección por
+    # carpeta de instalación real, no por nombre ni por IA) Y activa
+    # no molestar, con un solo comando.
+    #
+    # Se arma como "cadena" (el mismo mecanismo ya usado para "abre
+    # discord y spotify") combinando dos intents que YA existen por
+    # separado ("cerrar_juegos" y "activar_no_molestar") — en vez de
+    # una función nueva dedicada, reutiliza tal cual el resumen
+    # hablado ("Listo: cerrar los juegos abiertos y activar no
+    # molestar") que _ejecutar_pasos()/_resumen_pasos() en executor.py
+    # ya arman para cualquier cadena.
+    #
+    # Se revisa ANTES que "cierra todos los juegos" (más abajo) — si
+    # se revisara después, "modo estudio" nunca llegaría a matchear
+    # nada raro (los textos son bien distintos), pero se mantiene este
+    # orden por claridad: los combos primero, las acciones sueltas
+    # después.
+    # =====================================================
+
+    FRASES_MODO_ESTUDIO = (
+        "modo estudio", "modo enfoque",
+        "activa el modo estudio", "activa el modo enfoque",
+        "activa modo estudio", "activa modo enfoque",
+        "ponme en modo estudio", "ponme en modo enfoque",
+        # FIX/NUEVO: NO "quiero estudiar"/"quiero concentrarme" — a
+        # esta altura del pipeline el comando YA pasó por
+        # quitar_muletillas() (ver el inicio de detectar_intent), que
+        # le quita el prefijo "quiero " a cualquier frase que empiece
+        # así. "quiero estudiar" llega acá convertido en "estudiar" a
+        # secas — son estas formas cortas, no las originales con
+        # "quiero", las que hay que listar para que de verdad
+        # coincidan con lo que el comando ya es en este punto.
+        "estudiar", "concentrarme",
+    )
+
+    if any(comando == p or comando.startswith(p) for p in FRASES_MODO_ESTUDIO):
+        import json
+        minutos = _extraer_minutos_no_molestar(comando)
+        pasos = [
+            {"intent": "cerrar_juegos", "valor": ""},
+            {"intent": "activar_no_molestar", "valor": str(minutos)},
+        ]
+        return "cadena", json.dumps(pasos, ensure_ascii=False)
+
+    # =====================================================
+    # CERRAR TODOS LOS JUEGOS (standalone, sin no molestar)
+    # =====================================================
+
+    FRASES_CERRAR_JUEGOS = (
+        "cierra todos los juegos", "cierra los juegos",
+        "cierra los juegos abiertos", "cierra mis juegos",
+        "cierra cualquier juego", "cierra todo lo que sea un juego",
+    )
+
+    if any(comando == p or comando.startswith(p) for p in FRASES_CERRAR_JUEGOS):
+        return "cerrar_juegos", "juegos"
+
+    # =====================================================
+    # COMANDOS DE SISTEMA — apagar, reiniciar, suspender, bloquear
+    # NUEVO: a propósito, comparación EXACTA (sin frase_coincide_difuso)
+    # para las acciones destructivas (apagar/reiniciar) — dado lo
+    # irreversible de un falso positivo acá, se prefiere que una
+    # transcripción imperfecta simplemente no dispare nada (y caiga a
+    # la IA, o no se reconozca) antes que arriesgar una coincidencia
+    # de más. Ver el comentario detallado en acciones_sistema.py sobre
+    # por qué se evita a propósito la palabra "dormir"/"duerme" para
+    # suspender (ya la usa el modo dormido DEL ASISTENTE, algo
+    # completamente distinto).
+    # =====================================================
+
+    FRASES_CANCELAR_APAGADO = (
+        "cancela el apagado", "cancela el reinicio",
+        "no apagues la pc", "no reinicies la pc",
+        "detén el apagado", "deten el apagado",
+    )
+    if any(comando == p or comando.startswith(p) for p in FRASES_CANCELAR_APAGADO):
+        return "cancelar_apagado", ""
+
+    FRASES_APAGAR_PC = (
+        "apaga la pc", "apaga la computadora", "apaga el equipo",
+        "apágate", "apagate",
+    )
+    if any(comando == p or comando.startswith(p) for p in FRASES_APAGAR_PC):
+        return "apagar_pc", ""
+
+    FRASES_REINICIAR_PC = (
+        "reinicia la pc", "reinicia la computadora", "reinicia el equipo",
+    )
+    if any(comando == p or comando.startswith(p) for p in FRASES_REINICIAR_PC):
+        return "reiniciar_pc", ""
+
+    FRASES_SUSPENDER_PC = (
+        "suspende la pc", "suspende la computadora", "suspende el equipo",
+        "pon la pc en suspensión", "pon la pc en suspension",
+        "hiberna la pc",
+    )
+    if any(comando == p or comando.startswith(p) for p in FRASES_SUSPENDER_PC):
+        return "suspender_pc", ""
+
+    FRASES_BLOQUEAR_PC = (
+        "bloquea la pc", "bloquea la pantalla", "bloquea el equipo",
+        "bloquea la computadora",
+    )
+    if any(comando == p or comando.startswith(p) for p in FRASES_BLOQUEAR_PC):
+        return "bloquear_pc", ""
 
     # =====================================================
     # MEDIA / REPRODUCCIÓN

@@ -31,14 +31,27 @@ hilo — el mismo patrón (no "oficialmente" garantizado por la
 documentación de Tk, pero ampliamente usado en la práctica, y ya
 usado en este mismo proyecto en setup_groq_gui.py) que actualizar
 widgets desde un hilo de validación en background.
+
+FIX/NUEVO: el ícono de la app (ver icono_app.py) se fija en ESTE root
+apenas se crea (_fijar_icono_ventana, más abajo) — como ui.py después
+reutiliza este mismo root para el orbe/panel (nunca crea uno nuevo,
+ver el FIX documentado en SplashUI._tick), fijarlo acá una sola vez
+alcanza para toda la vida de la app. Corriendo con "python main.py"
+sin compilar, esto es lo que hace que la barra de título/Alt-Tab
+muestren el ícono del asistente — para la barra de TAREAS de Windows
+además hace falta el AppUserModelID que main.py fija antes de llamar
+a mostrar_splash() (ver el comentario ahí para el porqué).
 """
 
 import math
 import threading
+import time
 import tkinter as tk
 
 from splash_estado import get_estado, set_estado, pedir_cierre, reset
 from visual_utils import dibujar_puntos_spinner
+from plataforma import es_windows
+from icono_app import RUTA_ICONO_ICO, RUTA_ICONO_PNG, existe_icono
 
 # =========================================================
 # PALETA
@@ -118,7 +131,27 @@ class SplashUI:
         estado = get_estado()
 
         if estado["cerrar"]:
-            self.root.destroy()
+            # FIX: antes esto hacía self.root.destroy() -- terminaba
+            # por completo este intérprete de Tcl/Tk. El problema es
+            # que ui.py después creaba un tk.Tk() NUEVO en un hilo
+            # NUEVO para la ventana principal, y ese SEGUNDO
+            # intérprete de Tcl, en un SEGUNDO hilo, es justo lo que
+            # hace fallar al notifier de eventos de Tcl 9 (basado en
+            # epoll desde TIP 458) con "epoll_ctl: Invalid argument"
+            # en el sandbox de Distrobox/Bazzite -- un abort a nivel
+            # de C (Tcl_Panic) que tumba TODO el proceso sin que
+            # Python pueda atraparlo (confirmado con
+            # PYTHONFAULTHANDLER=1: el stack cae en TkpOpenDisplay).
+            #
+            # Ahora este root NO se destruye -- solo se oculta y se
+            # limpian sus widgets -- para que ui.py lo reutilice (ver
+            # obtener_root()/ejecutar_en_hilo_gui() más abajo, y
+            # iniciar_ui() en ui.py) en vez de crear un segundo
+            # intérprete de Tcl. Así, durante toda la vida del
+            # proceso, un único hilo abre un único notifier de Tcl.
+            self.root.withdraw()
+            for widget in self.root.winfo_children():
+                widget.destroy()
             return
 
         self.lbl_estado.config(text=estado["texto"])
@@ -146,6 +179,47 @@ _root        = None
 _root_listo  = threading.Event()
 
 
+def _fijar_icono_ventana(root):
+    """
+    Fija el ícono de la app en `root` — se llama UNA sola vez, justo
+    al crear el root (ver _run() más abajo), y como ui.py reutiliza
+    ese mismo root para todo el resto de la app (nunca crea uno
+    nuevo), alcanza con esta única llamada para toda la sesión.
+
+    Windows y Linux usan mecanismos DISTINTOS en Tkinter:
+      - Windows: iconbitmap() acepta un .ico directo — es lo que
+        también ayuda a que la barra de tareas muestre el ícono
+        correcto en vez del de python.exe (junto con el
+        AppUserModelID que main.py fija antes de mostrar_splash(),
+        ver el comentario ahí — ninguno de los dos alcanza solo).
+      - Linux: iconbitmap() espera formato X11 bitmap (.xbm), NO
+        .ico — para PNG (lo que sí tenemos) hay que usar iconphoto()
+        con un tk.PhotoImage en su lugar.
+
+    Si el archivo de ícono no está presente (ej. alguien corriendo el
+    código sin los assets del repo completo) esto no rompe el
+    arranque — se degrada en silencio a los íconos por defecto de
+    Tk/el sistema operativo, igual que pasaba antes de este cambio.
+    """
+    if not existe_icono():
+        return
+
+    try:
+        if es_windows():
+            root.iconbitmap(default=str(RUTA_ICONO_ICO))
+        else:
+            imagen = tk.PhotoImage(file=str(RUTA_ICONO_PNG))
+            root.iconphoto(True, imagen)
+            # se guarda una referencia en el propio root — PhotoImage
+            # no tiene ninguna referencia fuerte propia desde Tkinter,
+            # así que sin esto el recolector de basura de Python podía
+            # liberarla apenas termina esta función y el ícono
+            # desaparecer silenciosamente poco después.
+            root._icono_app_referencia = imagen
+    except Exception as e:
+        print(f"[Splash] No se pudo fijar el ícono de la ventana: {e}")
+
+
 def mostrar_splash():
     """
     Lanza el splash en su propio hilo. Llamar UNA vez, lo antes
@@ -160,6 +234,7 @@ def mostrar_splash():
         global _root
         try:
             root  = tk.Tk()
+            _fijar_icono_ventana(root)
             _root = root
             _root_listo.set()
             SplashUI(root)
@@ -272,11 +347,21 @@ def actualizar_splash(texto):
 
 def cerrar_splash():
     """
-    Pide que se cierre el splash y espera brevemente a que
+    Pide que se oculte el splash y espera brevemente a que
     desaparezca antes de continuar — así no queda flotando encima
     de la interfaz principal ni un instante de más.
+
+    FIX: antes esto hacía _hilo_splash.join(timeout=2), porque
+    pedir_cierre() terminaba destruyendo el root y con eso el hilo
+    del splash retornaba solo. Ahora el root YA NO se destruye (ver
+    SplashUI._tick) — sigue vivo, con su mainloop corriendo, para que
+    ui.py lo reutilice — así que el hilo nunca termina por su cuenta
+    y join() se quedaría esperando el timeout completo sin sentido.
+    En su lugar, se espera un instante breve (más que el intervalo de
+    60ms de _tick) para darle tiempo a ocultar la ventana y limpiar
+    sus widgets antes de que la ventana principal se muestre encima.
     """
     if _hilo_splash is None:
         return
     pedir_cierre()
-    _hilo_splash.join(timeout=2)
+    time.sleep(0.12)

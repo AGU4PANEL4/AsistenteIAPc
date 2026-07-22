@@ -238,6 +238,13 @@ def ejecutar(intent, valor, silencioso=False):
             "crear_macro", "listar_macros", "eliminar_macro",
             "activar_no_molestar", "desactivar_no_molestar", "estado_no_molestar",
             "crear_recordatorio_recurrente", "conversion_unidades",
+            # NUEVO: cerrar_juegos y los comandos de sistema también
+            # devuelven su propio mensaje específico en la tupla
+            # (ej. "No tenías ningún juego abierto", "Apagando la PC
+            # en 10 segundos...") en vez de un nombre de app genérico
+            # — mismo patrón que activar_no_molestar de arriba.
+            "cerrar_juegos", "apagar_pc", "reiniciar_pc",
+            "cancelar_apagado", "suspender_pc", "bloquear_pc",
         )
 
         # FIX: eliminar_alias ahora usa un flujo guiado completo (ver
@@ -335,6 +342,13 @@ def ejecutar(intent, valor, silencioso=False):
         "ayuda":                  nombre_decir,
         # conversión de unidades
         "conversion_unidades":    nombre_decir,
+        # NUEVO: cerrar todos los juegos + comandos de sistema
+        "cerrar_juegos":          nombre_decir,
+        "apagar_pc":              nombre_decir,
+        "reiniciar_pc":           nombre_decir,
+        "cancelar_apagado":       nombre_decir,
+        "suspender_pc":           nombre_decir,
+        "bloquear_pc":            nombre_decir,
     }
 
     mensaje = mensajes_exito.get(intent)

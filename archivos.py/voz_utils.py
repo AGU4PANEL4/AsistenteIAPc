@@ -183,23 +183,60 @@ PALABRAS_NO = {
 }
 
 
+def _contiene_palabra(respuesta, palabras):
+    """
+    True si alguna de `palabras` aparece en `respuesta` como PALABRA
+    COMPLETA (con límites de palabra), no como substring suelto.
+
+    FIX/NUEVO: es_afirmacion()/es_negacion() comparaban con `palabra
+    in respuesta` — substring simple, sin límites de palabra. Eso
+    causaba falsos positivos con palabras españolas comunes que
+    CONTIENEN "si"/"no" sin significar sí/no en absoluto:
+    "casi" contiene "si" (ca-SI), "así" contiene "sí" (a-SÍ),
+    "quisiera" contiene "si" (qui-SI-era) → es_afirmacion() los
+    tomaba como un "sí". Del otro lado, "bueno" contiene "no"
+    (bue-NO) y "nosotros" empieza con "no" → es_negacion() los
+    tomaba como un "no", aunque "bueno" dicho solo es, en el uso
+    coloquial real, más bien una forma de decir que sí.
+
+    El caso encontrado más grave: "no, casi seguro que no" — una
+    negación inequívoca para cualquier persona, con "no" repetido
+    dos veces — se interpretaba como AFIRMACIÓN, porque
+    es_afirmacion() se revisa primero en interpretar_confirmacion()
+    y "casi" ya alcanzaba para que diera True antes de siquiera
+    llegar a mirar es_negacion(). Alguien confirmando que NO quiere
+    algo podía terminar con el asistente haciéndolo de todas formas.
+
+    Ahora se usa \\b (límite de palabra) en la comparación, igual que
+    ya se usa en intents.py (normalizar/CORRECCIONES) para el mismo
+    tipo de problema — "si"/"no" solo cuentan cuando son una palabra
+    completa por sí solas, nunca el fragmento de otra más larga.
+    """
+    respuesta = respuesta or ""
+    return any(
+        re.search(rf"\b{re.escape(palabra)}\b", respuesta)
+        for palabra in palabras
+    )
+
+
 def es_afirmacion(respuesta, extras_si=None):
     """
     True si `respuesta` contiene alguna palabra de afirmación
     (PALABRAS_SI + las palabras extra opcionales de `extras_si`,
     útiles para variantes específicas del contexto de la pregunta,
-    ej. "ábrelo" al confirmar apertura de una app).
+    ej. "ábrelo" al confirmar apertura de una app), comparando por
+    PALABRA COMPLETA — ver _contiene_palabra() para el motivo.
     """
     respuesta = (respuesta or "").lower()
     palabras  = PALABRAS_SI | set(extras_si or [])
-    return any(palabra in respuesta for palabra in palabras)
+    return _contiene_palabra(respuesta, palabras)
 
 
 def es_negacion(respuesta, extras_no=None):
     """Lo mismo que es_afirmacion(), pero para negaciones."""
     respuesta = (respuesta or "").lower()
     palabras  = PALABRAS_NO | set(extras_no or [])
-    return any(palabra in respuesta for palabra in palabras)
+    return _contiene_palabra(respuesta, palabras)
 
 
 # =========================================================
@@ -316,6 +353,12 @@ def describir_paso(intent, valor):
         "abrir_url":           f"abrir {valor}",
         "activar_startup":     "activar inicio automático",
         "desactivar_startup":  "desactivar inicio automático",
+        # NUEVO: usado por el modo estudio/enfoque (ver intents.py,
+        # que arma una "cadena" combinando esto con
+        # activar_no_molestar) y disponible standalone también
+        # ("cierra todos los juegos").
+        "cerrar_juegos":       "cerrar los juegos abiertos",
+        "activar_no_molestar": "activar no molestar",
     }
     return descripciones.get(intent, f"{intent} {valor}".strip())
 

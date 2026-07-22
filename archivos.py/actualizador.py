@@ -441,6 +441,33 @@ def buscar_actualizacion_ahora(valor=None):
 
     tag_local = obtener_version_local()
 
+    # FIX/NUEVO: _hay_version_nueva() devuelve False cuando no hay
+    # versión local registrada (tag_local == "") — ver su propio
+    # comentario ("sin versión local registrada → siempre hay algo
+    # nuevo... ver el manejo de primera vez en cada camino"). Ese
+    # "manejo de primera vez" existía en
+    # verificar_actualizacion_arranque() (más arriba en este mismo
+    # archivo) pero NUNCA se agregó acá — así que este comando
+    # respondía "Ya tienes la última versión instalada" sin ninguna
+    # base real, y como tampoco registraba ninguna versión, el
+    # problema se repetía CADA VEZ que se pedía "busca
+    # actualizaciones", dejando el comando efectivamente roto para
+    # siempre en cualquier instalación que llegara a este código
+    # antes de que el chequeo automático del arranque llegara a
+    # registrar una versión (ej. primer arranque sin internet, y
+    # recién más tarde el usuario pide buscar actualizaciones por voz
+    # una vez que la conexión volvió). Mismo criterio que en
+    # verificar_actualizacion_arranque(): sin versión local, se
+    # asume que el .exe que se está corriendo YA es la última
+    # release (no hay forma de saber lo contrario), se registra, y
+    # se informa como al día — pero ahora sí queda una versión
+    # guardada, así que la PRÓXIMA vez que se compare, la comparación
+    # ya es real.
+    if not tag_local:
+        print(f"[Actualizador] Sin versión local registrada — registrando versión actual: {tag_remoto}")
+        guardar_version_local(tag_remoto)
+        return True, "Ya tienes la última versión instalada"
+
     if not _hay_version_nueva(tag_remoto, tag_local):
         return True, "Ya tienes la última versión instalada"
 

@@ -5,21 +5,30 @@ import re
 import time
 import shutil
 import threading
-import winreg
 import unicodedata
+import psutil
 from pathlib import Path
 from difflib import SequenceMatcher
 
+from plataforma import es_linux
+
+# NUEVO: winreg solo existe en Windows — antes se importaba sin
+# condición alguna, así que el simple hecho de importar app_finder.py
+# en Linux tumbaba el asistente completo con un ModuleNotFoundError,
+# antes de llegar a ejecutar una sola línea de código propio.
+try:
+    import winreg
+except ImportError:
+    winreg = None
+
 # ==========================================
 # CARPETA DE DATOS PERMANENTE
+# NUEVO: CARPETA_DATOS ahora viene de rutas_datos.py (multiplataforma)
+# — antes se calculaba acá mismo con os.environ["LOCALAPPDATA"], que
+# solo existe en Windows y tiraba KeyError en Linux.
 # ==========================================
 
-CARPETA_DATOS = (
-    Path(os.environ["LOCALAPPDATA"])
-    / "AsistenteIA"
-)
-
-CARPETA_DATOS.mkdir(parents=True, exist_ok=True)
+from rutas_datos import CARPETA_DATOS
 
 # ==========================================
 # MIGRAR DATOS ANTIGUOS
@@ -478,6 +487,71 @@ def limpiar_cache_duplicados():
 # INDEXAR JUEGOS STEAM
 # =========================================================
 
+def _encontrar_steam_path():
+    """
+    Devuelve la carpeta raíz de instalación de Steam (donde vive la
+    subcarpeta "steamapps" principal), o None si no se encontró.
+
+    El resto del escaneo (leer libraryfolders.vdf, recorrer los
+    appmanifest_*.acf) es el MISMO formato de archivo en Windows y en
+    Linux — Valve usa el mismo formato VDF en ambas plataformas, solo
+    cambia DÓNDE está instalado Steam por defecto. Por eso solo esta
+    función chica necesita una rama por sistema operativo; todo lo
+    que sigue en _escanear_juegos_steam() es código compartido.
+    """
+    if es_linux():
+        return _encontrar_steam_path_linux()
+    return _encontrar_steam_path_windows()
+
+
+def _encontrar_steam_path_windows():
+    try:
+        clave = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Valve\Steam")
+        return Path(winreg.QueryValueEx(clave, "SteamPath")[0])
+    except Exception as e:
+        print("No se encontró Steam:", e)
+        return None
+
+
+def _encontrar_steam_path_linux():
+    """
+    NUEVO: en Linux, Steam no se registra en ningún lado consultable
+    como el registro de Windows — se prueban las ubicaciones
+    ESTÁNDAR donde el instalador oficial de Steam para Linux (y el
+    paquete de la mayoría de distros) lo dejan, en orden de qué tan
+    común es cada una:
+
+      1. ~/.steam/steam — symlink que el instalador oficial de Steam
+         para Linux crea apuntando a la instalación real, la ruta
+         "canónica" recomendada por Valve para scripts de terceros.
+      2. ~/.local/share/Steam — la instalación real detrás de ese
+         symlink en la mayoría de los casos (se prueba por separado
+         porque el symlink de arriba a veces no existe aunque Steam
+         sí esté instalado).
+      3. ~/.var/app/com.valvesoftware.Steam/.local/share/Steam — la
+         misma instalación pero empaquetada como Flatpak (cada vez
+         más común, ej. es la forma en que Steam se instala en
+         Fedora/Bazzite y otras distros que priorizan Flatpak).
+
+    Se devuelve la primera que exista Y tenga una subcarpeta
+    "steamapps" real (para no confundir una carpeta vacía o a medio
+    crear con una instalación válida).
+    """
+    candidatas = [
+        Path.home() / ".steam" / "steam",
+        Path.home() / ".local" / "share" / "Steam",
+        Path.home() / ".var" / "app" / "com.valvesoftware.Steam"
+                    / ".local" / "share" / "Steam",
+    ]
+
+    for candidata in candidatas:
+        if (candidata / "steamapps").is_dir():
+            return candidata
+
+    print("No se encontró Steam en las rutas conocidas de Linux")
+    return None
+
+
 def _escanear_juegos_steam():
     """
     Escanea las bibliotecas de Steam y devuelve un dict {nombre:
@@ -501,12 +575,8 @@ def _escanear_juegos_steam():
     """
     nuevo_index = {}
 
-    steam_path = None
-    try:
-        clave      = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Valve\Steam")
-        steam_path = Path(winreg.QueryValueEx(clave, "SteamPath")[0])
-    except Exception as e:
-        print("No se encontró Steam:", e)
+    steam_path = _encontrar_steam_path()
+    if steam_path is None:
         return nuevo_index
 
     print("Steam encontrada:", steam_path)
@@ -566,12 +636,32 @@ def _escanear_juegos_steam():
                     appid    = match_appid.group(1) if match_appid else ""
                     exe_path = match_exe.group(1)   if match_exe  else ""
 
+                    # NUEVO: carpeta_juego es la carpeta de instalación
+                    # REAL del juego (steamapps/common/<installdir>) —
+                    # a diferencia de "ruta" (que para Steam apunta al
+                    # archivo .acf del manifest, no a una carpeta) y de
+                    # "exe_name" (el installdir crudo, útil para mostrar
+                    # pero no para comparar rutas de procesos). Se usa
+                    # para detectar si un proceso EN EJECUCIÓN pertenece
+                    # a este juego por dónde está su .exe físicamente,
+                    # sin depender de que el nombre del proceso se
+                    # parezca al nombre del juego — ver
+                    # procesos_de_juegos_en_ejecucion() más abajo, usada
+                    # por el modo estudio/enfoque para cerrar todos los
+                    # juegos abiertos sin necesitar que el usuario los
+                    # haya abierto antes por voz.
+                    carpeta_juego = (
+                        str(manifest.parent / "common" / exe_path)
+                        if exe_path else ""
+                    )
+
                     nuevo_index[nombre] = {
-                        "ruta":     str(manifest),
-                        "appid":    appid,
-                        "tipo":     "steam",
-                        "exe_name": exe_path or nombre,
-                        "oculto":   False
+                        "ruta":          str(manifest),
+                        "appid":         appid,
+                        "tipo":          "steam",
+                        "exe_name":      exe_path or nombre,
+                        "carpeta_juego": carpeta_juego,
+                        "oculto":        False
                     }
 
                     print("Juego Steam encontrado:", nombre)
@@ -634,6 +724,20 @@ def _escanear_juegos_epic():
     """
     nuevo_index = {}
 
+    # NUEVO: Epic Games Launcher no corre nativo en Linux — quien
+    # quiere jugar títulos de Epic ahí usa alternativas no oficiales
+    # (Heroic Games Launcher, Lutris), cada una con su PROPIO formato
+    # de manifest, distinto entre sí y distinto del que lee esta
+    # función — soportarlas requeriría tratar a cada una como una
+    # integración aparte, no una simple rama de plataforma. Se omite
+    # a propósito (en vez de dejar que CARPETA_MANIFESTS_EPIC.exists()
+    # devuelva False "por accidente" al ser una ruta de Windows), con
+    # un mensaje que explica el motivo real en vez de sugerir que Epic
+    # simplemente "no está instalado".
+    if es_linux():
+        print("Epic Games Launcher no corre nativo en Linux — se omite ese escaneo")
+        return nuevo_index
+
     if not CARPETA_MANIFESTS_EPIC.exists():
         print("No se encontró Epic Games Launcher (o no tiene juegos instalados)")
         return nuevo_index
@@ -668,11 +772,17 @@ def _escanear_juegos_epic():
                 continue
 
             nuevo_index[nombre] = {
-                "ruta":     ruta_instalacion or str(manifest),
-                "app_name": app_name,
-                "tipo":     "epic",
-                "exe_name": nombre_mostrado,
-                "oculto":   False,
+                "ruta":          ruta_instalacion or str(manifest),
+                "app_name":      app_name,
+                "tipo":          "epic",
+                "exe_name":      nombre_mostrado,
+                # NUEVO: a diferencia de Steam (donde hubo que derivar
+                # la carpeta real desde el installdir del manifest —
+                # ver _escanear_juegos_steam), acá InstallLocation YA
+                # ES la carpeta de instalación real del juego, lista
+                # para usar tal cual en procesos_de_juegos_en_ejecucion().
+                "carpeta_juego": ruta_instalacion or "",
+                "oculto":        False,
             }
 
             print("Juego Epic encontrado:", nombre)
@@ -1247,6 +1357,87 @@ def buscar_app(nombre, fn_confirmar_rebuscar=None, fn_cancelado=None):
 
     registrar_no_encontrada(nombre)
     return None, False, None
+
+# =========================================================
+# JUEGOS ACTUALMENTE EN EJECUCIÓN
+# NUEVO: usado por el modo estudio/enfoque (ver cerrar_juegos_abiertos
+# en acciones_apps.py) para cerrar TODOS los juegos abiertos con un
+# solo comando, sin necesitar que el usuario los haya abierto antes
+# a través del asistente (a diferencia de cerrar_app(), que depende
+# de un nombre dicho por voz para buscar en cache/índices).
+#
+# El cruce es por CARPETA DE INSTALACIÓN (el .exe en ejecución está
+# físicamente DENTRO de la carpeta del juego, ver carpeta_juego en
+# _escanear_juegos_steam/_escanear_juegos_epic), no por nombre de
+# proceso ni por IA — un juego puede arrancar con un .exe de nombre
+# completamente distinto al título (Fortnite arranca
+# FortniteClient-Win64-Shipping.exe, no "fortnite.exe"), pero SIEMPRE
+# corre desde dentro de su propia carpeta de instalación. Esto evita
+# tanto los falsos negativos de comparar nombres/similitud de texto,
+# como el costo, la latencia, y el riesgo de que una IA clasifique
+# mal una app ambigua como "juego" o viceversa.
+# =========================================================
+
+def procesos_de_juegos_en_ejecucion():
+    """
+    Devuelve una lista de dicts {"nombre": <nombre del juego>, "pids":
+    [pid, ...]} — uno por cada juego de games_index que tenga al
+    menos un proceso corriendo AHORA MISMO desde su carpeta de
+    instalación real. Lista vacía si no hay ningún juego corriendo,
+    o si ningún juego indexado tiene carpeta_juego resuelta (ej. una
+    instalación con games_index viejo, de antes de que este campo
+    existiera — se resuelve solo en el próximo indexar_juegos()).
+    """
+    # FIX: igual que en buscar_app() (ver el comentario detallado ahí)
+    # — indexar_juegos() corre en un hilo daemon en background y muta
+    # games_index directamente (incluyendo un .clear()). Si
+    # procesos_de_juegos_en_ejecucion() se llama justo en ese momento
+    # (ej. "cierra todos los juegos" pedido durante el arranque,
+    # mientras la indexación de fondo todavía no terminó), iterar
+    # games_index.items() SIN copiar podía lanzar "RuntimeError:
+    # dictionary changed size during iteration" — este archivo ya
+    # tiene ese mismo fix aplicado en todos los demás lugares que
+    # iteran games_index/apps_index/cache, pero acá había quedado sin
+    # aplicar. list(...) toma una copia atómica del momento.
+    juegos_con_carpeta = [
+        (nombre, data.get("carpeta_juego", ""))
+        for nombre, data in list(games_index.items())
+        if data.get("carpeta_juego")
+    ]
+
+    if not juegos_con_carpeta:
+        return []
+
+    # normalizar una sola vez (minúsculas + separador de carpeta
+    # consistente) en vez de repetirlo por cada proceso comparado
+    juegos_normalizados = [
+        (nombre, os.path.normpath(carpeta).lower() + os.sep)
+        for nombre, carpeta in juegos_con_carpeta
+    ]
+
+    resultado = {}  # nombre del juego -> set de pids
+
+    for proc in psutil.process_iter(["pid", "exe"]):
+        try:
+            exe = proc.info.get("exe") or ""
+            if not exe:
+                continue
+
+            exe_normalizado = os.path.normpath(exe).lower()
+
+            for nombre, carpeta_norm in juegos_normalizados:
+                if (exe_normalizado + os.sep).startswith(carpeta_norm) or \
+                   exe_normalizado.startswith(carpeta_norm):
+                    resultado.setdefault(nombre, set()).add(proc.info["pid"])
+                    break  # un proceso pertenece a un solo juego
+
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+
+    return [
+        {"nombre": nombre, "pids": list(pids)}
+        for nombre, pids in resultado.items()
+    ]
 
 # =========================================================
 # CARGAR ARCHIVOS AL INICIO

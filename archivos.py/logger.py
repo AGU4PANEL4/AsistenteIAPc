@@ -30,7 +30,9 @@ import os
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-CARPETA_DATOS  = Path(os.environ["LOCALAPPDATA"]) / "AsistenteIA"
+from rutas_datos import CARPETA_DATOS
+
+# NUEVO: CARPETA_DATOS ahora viene de rutas_datos.py (multiplataforma).
 ARCHIVO_LOG    = CARPETA_DATOS / "asistente.log"
 
 # Rotación: cuando el archivo llega a ~2MB, se renombra a .log.1 y se

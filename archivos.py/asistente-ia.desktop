@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Asistente IA
+Comment=Asistente de voz con IA
+Exec=__RUTA_BINARIO__
+Icon=utilities-terminal
+Terminal=false
+Categories=Utility;
