@@ -1626,33 +1626,6 @@ def maximizar_app(nombre):
     return _maximizar_app_linux(nombre)
 
 
-def _maximizar_app_linux(nombre):
-    """
-    Mucho más simple que el lado Windows (ver _maximizar_app_windows)
-    — X11 y la inmensa mayoría de gestores de ventanas Linux NO
-    tienen el mismo mecanismo de "robo de foco bloqueado"
-    (LockSetForegroundWindow) que tiene Windows, así que no hace
-    falta ningún truco de tecla ALT, AttachThreadInput, toggle de
-    TOPMOST, ni un comando externo de refuerzo: "wmctrl -a" (ver
-    ventanas_linux.activar_ventana) ya restaura y da foco real en un
-    solo paso, tal como lo haría un click del usuario en la barra de
-    tareas.
-    """
-    ventanas = []
-    for intento in range(3):
-        ventanas = _buscar_ventanas_por_nombre(nombre, incluir_ocultas=False)
-        if ventanas:
-            break
-        if intento < 2:
-            time.sleep(1)
-
-    if not ventanas:
-        return False, nombre
-
-    exito = ventanas_linux.activar_ventana(ventanas[0])
-    return exito, nombre
-
-
 def _maximizar_app_windows(nombre):
 
     for intento in range(3):
@@ -1760,3 +1733,16 @@ def _maximizar_app_windows(nombre):
 
     except Exception as e:
         print(f"[MAX] Error: {e}")
+        # FIX: antes esta función no retornaba nada acá -- caía en
+        # None implícito, pero maximizar_app() (y por lo tanto
+        # tools.py, que expone esto como "maximizar_app" en TOOLS) la
+        # llama esperando SIEMPRE una tupla (bool, str), igual que en
+        # el resto de acciones del proyecto. Si algo fallaba dentro
+        # del try (ej. SetForegroundWindow rechazado, un PowerShell
+        # que no arranca, cualquier excepción de win32gui), el caller
+        # recibía None y el unpack `exito, nombre = maximizar_app(...)`
+        # explotaba con TypeError -- un error de programación, no del
+        # sistema operativo, tumbando el comando de voz completo (y,
+        # según desde dónde se llame, potencialmente el hilo que lo
+        # ejecuta) en vez de reportar limpiamente "no pude maximizar".
+        return False, nombre

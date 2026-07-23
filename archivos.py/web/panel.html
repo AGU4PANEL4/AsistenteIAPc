@@ -5,6 +5,8 @@
 <title>AsistenteIA</title>
 <link rel="stylesheet" href="panel.css">
 <base target="_blank">
+<base target="_blank">
+<base target="_blank">
 </head>
 <body>
   <div id="panel">
@@ -17,34 +19,82 @@
           <circle id="orbe-base" cx="48" cy="48" r="24"
                   fill="#10262c" stroke="#1c3a3f" stroke-width="2"/>
 
-          <!-- Ojos abiertos -->
-          <circle id="ojo-izq" cx="39" cy="45" r="2.5" fill="#3a5a5c"/>
-          <circle id="ojo-der" cx="57" cy="45" r="2.5" fill="#3a5a5c"/>
+          <!-- === OJOS === -->
+          <g id="ojos-abiertos">
+            <!-- Pupila izquierda -->
+            <circle id="pupila-izq" cx="39" cy="45" r="2.8" fill="#3a5a5c"/>
+            <!-- Brillo del ojo izquierdo -->
+            <circle id="brillo-izq" cx="40.2" cy="43.8" r="0.9" fill="rgba(255,255,255,0.35)" style="display:none"/>
 
-          <!-- Ojos cerrados (ocultos) -->
-          <line id="ojo-izq-cerrado" x1="36" y1="45" x2="42" y2="45"
-                stroke="#3a5a5c" stroke-width="2" stroke-linecap="round" style="display:none"/>
-          <line id="ojo-der-cerrado" x1="54" y1="45" x2="60" y2="45"
-                stroke="#3a5a5c" stroke-width="2" stroke-linecap="round" style="display:none"/>
+            <!-- Pupila derecha -->
+            <circle id="pupila-der" cx="57" cy="45" r="2.8" fill="#3a5a5c"/>
+            <!-- Brillo del ojo derecho -->
+            <circle id="brillo-der" cx="58.2" cy="43.8" r="0.9" fill="rgba(255,255,255,0.35)" style="display:none"/>
+          </g>
 
-          <!-- Boca neutra -->
-          <line id="boca-neutra" x1="44" y1="55" x2="52" y2="55"
-                stroke="#3a5a5c" stroke-width="2" stroke-linecap="round"/>
+          <!-- Ojos cerrados (parpadeo / dormido normal) -->
+          <g id="ojos-cerrados" style="display:none">
+            <line id="cerrado-izq" x1="35" y1="45" x2="43" y2="45"
+                  stroke="#3a5a5c" stroke-width="2" stroke-linecap="round"/>
+            <line id="cerrado-der" x1="53" y1="45" x2="61" y2="45"
+                  stroke="#3a5a5c" stroke-width="2" stroke-linecap="round"/>
+          </g>
 
-          <!-- Boca hablando (oculta) -->
+          <!-- Ojos medio abiertos (para animación dormido: casi despierta) -->
+          <g id="ojos-drowsy" style="display:none">
+            <path id="drowsy-izq" d="M 35 45 Q 39 43 43 45"
+                  fill="none" stroke="#8b9ae8" stroke-width="2" stroke-linecap="round"/>
+            <path id="drowsy-der" d="M 53 45 Q 57 43 61 45"
+                  fill="none" stroke="#8b9ae8" stroke-width="2" stroke-linecap="round"/>
+          </g>
+
+          <!-- Ojos espiral (mareo / dizzy) — ESPIRAL DE ARQUÍMEDES -->
+          <g id="ojos-spiral" style="display:none">
+            <!-- Ojo izquierdo: posición fija, espiral rota sobre su centro -->
+            <g transform="translate(39, 45)">
+              <g id="spiral-izq">
+                <path d="M 0.40 0.00 L 0.58 0.22 L 0.63 0.55 L 0.50 0.92 L 0.17 1.25 L -0.33 1.44 L -0.93 1.41 L -1.54 1.12 L -2.05 0.56 L -2.33 -0.21 L -2.30 -1.11 L -1.91 -2.00 L -1.17 -2.74 L -0.14 -3.20 L 1.06 -3.25 L 2.26 -2.84 L 3.30 -1.97 L 4.00 -0.73 L 4.21 0.76 L 3.86 2.30 L 2.94 3.68 L 1.52 4.68"
+                      fill="none" stroke="#3a5a5c" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+              </g>
+            </g>
+            <!-- Ojo derecho: posición fija, espiral rota sobre su centro (dirección opuesta) -->
+            <g transform="translate(57, 45)">
+              <g id="spiral-der">
+                <path d="M 0.40 -0.00 L 0.58 -0.22 L 0.63 -0.55 L 0.50 -0.92 L 0.17 -1.25 L -0.33 -1.44 L -0.93 -1.41 L -1.54 -1.12 L -2.05 -0.56 L -2.33 0.21 L -2.30 1.11 L -1.91 2.00 L -1.17 2.74 L -0.14 3.20 L 1.06 3.25 L 2.26 2.84 L 3.30 1.97 L 4.00 0.73 L 4.21 -0.76 L 3.86 -2.30 L 2.94 -3.68 L 1.52 -4.68"
+                      fill="none" stroke="#3a5a5c" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+              </g>
+            </g>
+          </g>
+
+          <!-- === BOCA === -->
+          <!-- Neutra (idle) - se anima via JS -->
+          <path id="boca-neutra" d="M 44 55 Q 48 55 52 55"
+                fill="none" stroke="#3a5a5c" stroke-width="2" stroke-linecap="round"/>
+
+          <!-- Hablando - se anima via JS -->
           <path id="boca-hablando" d="M 42 53 Q 48 59 54 53"
                 fill="none" stroke="#3a5a5c" stroke-width="2" stroke-linecap="round"
                 style="display:none"/>
 
-          <!-- Boca escuchando (oculta) -->
+          <!-- Escuchando -->
           <circle id="boca-escuchando" cx="48" cy="55" r="3"
                   fill="#3a5a5c" style="display:none"/>
 
-          <!-- Boca dormido (oculta) -->
+          <!-- Dormido -->
           <ellipse id="boca-dormido" cx="48" cy="55" rx="1.5" ry="1.5"
                    fill="#8b9ae8" style="display:none; opacity:0.5"/>
 
-          <!-- Z flotantes (ocultas) -->
+          <!-- Hover / sonrisa -->
+          <path id="boca-sonrisa" d="M 42 55 Q 48 61 54 55"
+                fill="none" stroke="#3a5a5c" stroke-width="2" stroke-linecap="round"
+                style="display:none"/>
+
+          <!-- Boca mareada (dizzy) — zigzag de mareo -->
+          <path id="boca-dizzy" d="M 40 55 L 43 52 L 46 58 L 49 52 L 52 58 L 55 55"
+                fill="none" stroke="#3a5a5c" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                style="display:none"/>
+
+          <!-- Z flotantes -->
           <g id="z-flotantes" style="display:none">
             <text id="z1" x="64" y="30" font-family="Segoe UI, sans-serif" font-size="8"
                   font-weight="bold" fill="#8b9ae8" text-anchor="middle" opacity="0">z</text>
@@ -52,7 +102,7 @@
                   font-weight="bold" fill="#8b9ae8" text-anchor="middle" opacity="0">z</text>
           </g>
 
-          <!-- Indicador de no molestar (oculto) -->
+          <!-- Indicador de no molestar -->
           <g id="dnd-indicador" style="display:none">
             <circle cx="69" cy="27" r="8" fill="#ff5566" stroke="#0b1a1f" stroke-width="2"/>
             <line x1="65" y1="27" x2="73" y2="27" stroke="#0b1a1f" stroke-width="3" stroke-linecap="round"/>

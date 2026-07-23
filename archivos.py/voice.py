@@ -129,12 +129,53 @@ UMBRAL_VAD_INICIO     = 0.5
 
 
 def _leer_muestras_crudas(source, n_muestras):
-    n_bytes = n_muestras * 2
-    datos = source.stream.read(n_bytes)
+    """
+    Lee `n_muestras` muestras (frames) de audio CRUDO del stream ya
+    abierto (bytes PCM de 16 bits, sin pasar por recognizer.listen())
+    y las devuelve como array float32 normalizado a [-1, 1] — el
+    formato que espera el modelo Silero VAD. Asume que el micrófono
+    está a 16kHz (ver _obtener_microfono, sample_rate=16000 forzado).
+
+    FIX: source.stream.read(x) —vía PyAudio— espera la cantidad de
+    FRAMES (muestras) a leer, NO la cantidad de bytes. La versión
+    anterior de esta función pasaba n_bytes (= n_muestras * 2, para
+    audio mono de 16 bits) como si fuera la cantidad de muestras a
+    leer — PyAudio terminaba leyendo el DOBLE de frames reales de los
+    que se pedían, y como cada frame son 2 bytes, la función devolvía
+    el doble de muestras de las que el resto del código (_escuchar_
+    con_vad, detectar_voz_breve) asumía que había leído.
+
+    Esto no rompía nada de forma visible (no había excepción, no
+    crasheaba), pero corrompía TODOS los cálculos de tiempo que
+    dependen de "cuántos milisegundos representa un grupo de
+    muestras" (ver duracion_grupo_seg en _escuchar_con_vad) — cada
+    grupo en realidad contenía el doble de audio real del que se
+    asumía, así que TODOS los umbrales configurados en
+    PERFILES_ESCUCHA (silencio antes de cortar, timeout de espera,
+    límite máximo de frase) terminaban corriendo al DOBLE de su valor
+    nominal en tiempo real (ej. un silencio configurado a 600ms
+    tardaba ~1200ms reales en disparar el corte de la escucha). Esta
+    misma función alimenta tanto la escucha de comandos normales
+    (_escuchar_con_vad) como la detección de interrupciones mientras
+    el asistente habla (detectar_voz_breve, usada por tts.py) — el
+    bug afectaba a ambas por igual.
+
+    Ahora se lee la cantidad de FRAMES correcta (n_muestras, sin
+    duplicar). El chequeo de longitud/padding se mantiene como red de
+    seguridad (por si el stream devuelve menos datos de los pedidos,
+    ej. al principio de la captura), pero ahora compara contra la
+    cantidad de BYTES real y correctamente esperada (n_muestras * 2),
+    no contra lo que antes se le pasaba a read().
+    """
+    datos = source.stream.read(n_muestras)
+
+    n_bytes_esperados = n_muestras * 2
+
     if len(datos) % 2 != 0:
         datos = datos[:-1]
-    if len(datos) < n_bytes:
-        datos += b'\x00' * (n_bytes - len(datos))
+    if len(datos) < n_bytes_esperados:
+        datos += b'\x00' * (n_bytes_esperados - len(datos))
+
     audio_int16 = np.frombuffer(datos, dtype=np.int16)
     return audio_int16.astype(np.float32) / 32768.0
 

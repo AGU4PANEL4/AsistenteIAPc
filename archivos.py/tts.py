@@ -12,14 +12,9 @@ from logger import log
 # =========================================================
 # CONFIGURACIÓN DE VOZ
 # =========================================================
-# FIX: voz configurable. El usuario puede cambiarla editando
-# config.py o el archivo de configuración. Por ahora, leer
-# de config.py si existe, sino usar default.
-# =========================================================
 
 VOZ_DEFAULT = "es-CO-SalomeNeural"
 
-# Voces disponibles en español por Edge TTS
 VOCES_DISPONIBLES = {
     # Femeninas
     "salome": "es-CO-SalomeNeural",
@@ -47,17 +42,13 @@ except ImportError:
 # =========================================================
 # CACHE DE AUDIO LOCAL
 # =========================================================
-# NUEVO: precarga frases comunes como archivos de audio locales.
-# La primera vez que el asistente arranca, genera los audios de
-# las frases más frecuentes y los guarda en disco. Las próximas
-# veces, reproduce directo desde el archivo — sin red, sin delay.
-# =========================================================
 
 _CARPETA_CACHE_TTS = Path.home() / ".asistente_ia" / "cache_tts"
 _CARPETA_CACHE_TTS.mkdir(parents=True, exist_ok=True)
 
-# Frases que se precargan en cache al inicio
+# FIX: frases comunes del sistema + flujos guiados (recordatorios, temporizadores, dormir)
 _FRASES_PRECARGAR = [
+    # Sistema general
     "Asistente listo",
     "¿En qué puedo ayudarte?",
     "¿Algo más?",
@@ -69,41 +60,111 @@ _FRASES_PRECARGAR = [
     "Te escucho, dime qué necesitas",
     "Ya estoy de vuelta",
     "Me quedo en silencio",
-    "No tengo forma de procesar eso ahora",
+    # FIX: esta frase NUNCA hacía match — el texto real que dice
+    # main.py incluye el motivo completo ("...: no hay internet y
+    # Ollama no está disponible"), y _obtener_audio_cacheado() compara
+    # por igualdad EXACTA de string. La entrada vieja generaba y
+    # guardaba audio que jamás se usaba. Se corrige al texto completo
+    # tal cual se habla.
+    "No tengo forma de procesar eso ahora: no hay internet y Ollama no está disponible",
     "Se está demorando mucho en responder, intenta de nuevo en un momento",
     "Todavía no dije nada",
     "Tuve un error inesperado, sigamos",
     "¿Sigues ahí?",
+
+    # Flujo de dormir (main.py)
+    "Me quedo en silencio. Decí \"despierta\" cuando me necesites",
+
+    # Recordatorios — frases fijas de error/éxito (recordatorios.py)
+    "No entendí a qué hora quieres el recordatorio diario",
+    "No entendí a qué hora quieres el recordatorio semanal",
+    "No tienes recordatorios pendientes",
+    "No entendí cuál recordatorio quieres cancelar",
+    "No pude cancelar el recordatorio",
+    # NUEVO: variante con "ese" en vez de "el" — cancelar_por_palabra_
+    # clave() en recordatorios.py usa esta redacción distinta en su
+    # último branch (cuando SÍ se identificó un recordatorio pero
+    # cancelar_recordatorio() falla) — sin esto, ese caso puntual
+    # nunca pegaba en cache pese a que el mensaje "hermano" ("...el
+    # recordatorio") sí estaba precargado.
+    "No pude cancelar ese recordatorio",
+
+    # Temporizadores — frases fijas de error/éxito (temporizadores.py)
+    "Se acabó el temporizador",
+    "No tienes temporizadores activos",
+    "No entendí cuál temporizador quieres cancelar",
+    "No pude cancelar el temporizador",
+    "Cancelé el temporizador",
+    # NUEVO: mismo caso que con recordatorios — cancelar_por_palabra_
+    # clave() en temporizadores.py también tiene una variante con
+    # "ese" en su último branch.
+    "No pude cancelar ese temporizador",
+
+    # NUEVO: flujo guiado de crear recordatorio simple
+    # (crear_recordatorio_accion, acciones_sistema.py) — las
+    # preguntas de preguntar_dato() y los mensajes de abandono/error
+    # son fijos y se dicen cada vez que falta un dato en el comando.
+    "¿Para cuándo quieres el recordatorio?",
+    "¿Qué nombre quieres para tu recordatorio?",
+    "No se creó el recordatorio",
+    "No entendí para cuándo quieres el recordatorio",
+    "No entendí el nombre del recordatorio",
+
+    # NUEVO: flujo guiado de recordatorio recurrente
+    # (crear_recordatorio_recurrente_accion, acciones_sistema.py)
+    "¿Qué quieres que te recuerde?",
+    "No entendí el texto del recordatorio",
+    "¿Cada cuánto tiempo quieres el recordatorio?",
+    "No entendí cada cuánto quieres el recordatorio",
+    "¿A qué hora quieres el recordatorio?",
+    "No entendí a qué hora quieres el recordatorio",
+    "¿Qué día de la semana?",
+
+    # NUEVO: flujo guiado de temporizador
+    # (crear_temporizador_accion, acciones_sistema.py)
+    "¿De cuánto tiempo quieres el temporizador?",
+    "No se creó el temporizador",
+    "No entendí la duración del temporizador",
+
+    # NUEVO: modo no molestar (no_molestar.py) — todas fijas, sin
+    # interpolación (a diferencia de activar()/estado() con minutos
+    # restantes, que sí varían y no se pueden precachear).
+    "El modo no molestar terminó.",
+    "Modo no molestar desactivado",
+    "El modo no molestar no está activo",
+    "El modo no molestar no estaba activo",
+
+    # NUEVO: confirmar_apertura (acciones_apps.py) — se dice cada vez
+    # que se abre una app que todavía no está en cache/índices, así
+    # que en uso normal (sobre todo al principio, antes de tener
+    # todo indexado) puede repetirse bastante.
+    "No te entendí, ¿la abro sí o no?",
+    "¿La abro sí o no?",
+    "No logré entenderte, dejémoslo por ahora",
 ]
 
 _cache_audio = {}  # texto normalizado -> bytes de audio
 
 
 def _hash_frase(texto, voz):
-    """Genera un nombre de archivo único para una frase+voz."""
     return hashlib.md5(f"{texto}|{voz}".encode()).hexdigest()[:16]
 
 
 def _ruta_cache(texto, voz):
-    """Devuelve la ruta del archivo cacheado para una frase."""
-    nombre = _hash_frase(texto, voz) + ".mp3"
-    return _CARPETA_CACHE_TTS / nombre
+    return _CARPETA_CACHE_TTS / (_hash_frase(texto, voz) + ".mp3")
 
 
 def _precargar_cache():
-    """Genera archivos de audio en cache para las frases comunes."""
     global _cache_audio
     print(f"[TTS] Precargando cache de audio para voz '{VOZ}'...")
     
     for frase in _FRASES_PRECARGAR:
         ruta = _ruta_cache(frase, VOZ)
         if ruta.exists():
-            # Ya existe en disco, cargar a memoria
             with open(ruta, "rb") as f:
                 _cache_audio[frase.lower()] = f.read()
             continue
         
-        # Generar con edge_tts y guardar
         try:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
@@ -124,12 +185,10 @@ def _precargar_cache():
 
 
 def _obtener_audio_cacheado(texto):
-    """Devuelve audio bytes si la frase está en cache, None si no."""
     return _cache_audio.get(texto.lower().strip())
 
 
 async def _generar_audio_edge(texto):
-    """Genera audio con Edge TTS. Devuelve bytes o None."""
     try:
         communicate = edge_tts.Communicate(texto, voice=VOZ)
         audio_data = b""
@@ -142,7 +201,7 @@ async def _generar_audio_edge(texto):
         return None
 
 
-# Precargar cache al importar el módulo (en segundo plano)
+# Precargar cache al importar el módulo
 threading.Thread(target=_precargar_cache, daemon=True, name="TTSCache").start()
 
 
@@ -178,16 +237,12 @@ def _calcular_demora_eco(hubo_superposicion=False, modo_escucha=None):
 
 pygame.mixer.init()
 
+
 # =========================================================
-# LOCK DE VOZ
+# LOCK DE VOZ + ÚLTIMO MENSAJE
 # =========================================================
 
 _lock_voz = threading.Lock()
-
-# =========================================================
-# ÚLTIMO MENSAJE
-# =========================================================
-
 _ultimo_mensaje = None
 
 
@@ -200,7 +255,6 @@ def ultimo_mensaje():
 # =========================================================
 
 def _hablar_respaldo(texto):
-    """Último recurso si todo lo demás falla. Voz del sistema."""
     try:
         import pyttsx3
         motor = pyttsx3.init()
@@ -217,7 +271,6 @@ def _hablar_respaldo(texto):
 # =========================================================
 
 def _reproducir_audio(audio_bytes):
-    """Reproduce audio desde bytes en memoria."""
     try:
         pygame.mixer.music.load(io.BytesIO(audio_bytes))
         pygame.mixer.music.play()
@@ -230,7 +283,7 @@ def _reproducir_audio(audio_bytes):
 
 
 # =========================================================
-# ESCUCHA EN PARALELO (para interrupciones)
+# ESCUCHA EN PARALELO (interrupciones)
 # =========================================================
 
 UMBRAL_VAD_SUPERPONER = 0.6
@@ -273,8 +326,6 @@ async def _hablar_async(texto, permitir_interrupcion):
     if audio_cacheado:
         print(f"[TTS] Cache hit: {texto!r}")
         _reproducir_audio(audio_cacheado)
-        # No hay interrupción en cache (reproducción síncrona simple)
-        # pero sí recalibramos
         if RECALIBRAR_TRAS_HABLAR:
             await asyncio.sleep(_calcular_demora_eco())
             try:
@@ -350,7 +401,7 @@ def hablar(texto, permitir_interrupcion=False):
         except Exception as e:
             print("[TTS] Error con Edge TTS, usando respaldo:", e)
             log.warning(f"Edge TTS falló. Texto: '{texto}'. Motivo: {e}")
-            # FIX: en error, intentar reproducir desde cache si existe
+            # FIX: intentar cache de respaldo por error
             audio_cacheado = _obtener_audio_cacheado(texto)
             if audio_cacheado:
                 print("[TTS] Usando cache de respaldo por error")

@@ -48,6 +48,18 @@ datos_certifi = collect_data_files("certifi")
 
 datas = [
     (str(RUTA_SR), "speech_recognition"),
+    # FIX: mismo bug que tenía asistente.spec (Windows) — la carpeta
+    # web/ (panel.html, panel.css, panel.js) que usa main_web.py vía
+    # pywebview no se copiaba, y tampoco los íconos que usa como
+    # ícono de ventana/bandeja. PyInstaller no detecta HTML/CSS/JS ni
+    # imágenes sueltas por análisis de imports, hay que declararlos a
+    # mano. Sin esto, pywebview tira 404 Not Found al abrir el panel.
+    # NOTA: este .spec no es el que usa armar_paquete_bazzite.sh hoy
+    # (ese instala directo con Python en una sandbox) — este fix es
+    # por si en algún momento se compila también en Linux con PyInstaller.
+    ("web", "web"),
+    ("asistente-ia.ico", "."),
+    ("asistente-ia.png", "."),
 ] + datos_tokenizers + datos_faster_whisper + datos_certifi
 
 hiddenimports = [

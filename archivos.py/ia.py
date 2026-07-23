@@ -1,5 +1,6 @@
 import ollama
 import re
+import random
 import concurrent.futures
 import hashlib
 import time
@@ -137,6 +138,62 @@ NORMALIZAR_INTENT = {
     "say_goodbye": "terminar_sesion", "finish": "terminar_sesion", "exit": "terminar_sesion",
 }
 
+# =========================================================
+# FIX/NUEVO: bugs reales reportados en uso —
+#
+# 1. "cuéntame un chiste" (charla libre, sin relación con ningún
+#    comando real) terminaba ejecutando ayuda_accion() en vez de
+#    llegar a responder_charla(). Causa: el prompt de
+#    interpretar_con_ia() lista "ayuda|" como una acción más entre
+#    docenas de comandos técnicos, sin ninguna condición fuerte sobre
+#    CUÁNDO usarla — un modelo chico, al no encontrar ningún comando
+#    real que calce con "cuéntame un chiste", puede "conformarse" con
+#    ayuda| como la opción menos mala de la lista, en vez de devolver
+#    "ninguna".
+#
+# 2. Un simple "abre X" terminaba ejecutando 4-5 acciones sin
+#    relación con lo pedido. Causa: parsear_salida() no tenía ningún
+#    límite de cuántas líneas action|value acepta de la respuesta del
+#    modelo, ni validaba que el texto ORIGINAL del usuario realmente
+#    pidiera varias cosas.
+#
+# Fix aplicado en dos frentes: prompt reforzado (ver
+# interpretar_con_ia) y validación post-parseo (ver parsear_salida).
+# =========================================================
+
+FRASES_AYUDA_EXPLICITA = (
+    "ayuda", "ayudame", "ayúdame",
+    "qué puedes hacer", "que puedes hacer",
+    "qué sabes hacer", "que sabes hacer",
+    "en qué me puedes ayudar", "en que me puedes ayudar",
+    "qué comandos", "que comandos", "qué órdenes", "que ordenes",
+    "cómo te uso", "como te uso", "cómo funcionas", "como funcionas",
+)
+
+
+def _es_pedido_ayuda_explicito(texto):
+    texto = (texto or "").lower()
+    return any(frase in texto for frase in FRASES_AYUDA_EXPLICITA)
+
+
+_CONECTORES_SECUENCIA = (
+    " y ", " y luego ", " y después ", " y despues ",
+    " luego ", " después ", " despues ",
+)
+
+
+def _texto_sugiere_multiples_acciones(texto):
+    """
+    True si el texto ORIGINAL del usuario (no la respuesta de la IA)
+    contiene algún conector que justifique más de una acción en la
+    misma frase — ver el FIX documentado arriba, punto 2.
+    """
+    texto = (texto or "").lower()
+    return any(conector in texto for conector in _CONECTORES_SECUENCIA)
+
+
+MAX_ACCIONES_POR_TURNO = 5
+
 
 # =========================================================
 # LIMPIAR LÍNEA + PARSEAR
@@ -153,7 +210,7 @@ def limpiar_linea(linea):
     return linea.strip()
 
 
-def parsear_salida(salida, ultima_app):
+def parsear_salida(salida, ultima_app, texto_original=""):
     acciones = []
     for linea in salida.splitlines():
         linea = limpiar_linea(linea)
@@ -167,6 +224,12 @@ def parsear_salida(salida, ultima_app):
             if intent not in ACCIONES_VALIDAS:
                 print(f"[IA] Intent ignorado: {intent}")
                 continue
+
+            if intent == "ayuda" and not _es_pedido_ayuda_explicito(texto_original):
+                print(f"[IA] 'ayuda' descartada — no fue un pedido explícito "
+                      f"(texto original: {texto_original!r})")
+                continue
+
             INTENTS_VALOR_VACIO_VALIDO = {"cancelar_temporizador", "eliminar_alias"}
             if intent in INTENTS_VALOR_VACIO_VALIDO:
                 pass
@@ -177,6 +240,19 @@ def parsear_salida(salida, ultima_app):
             acciones.append((intent, valor))
         except Exception as e:
             print("Error parseando línea:", e)
+
+    if len(acciones) > 1 and not _texto_sugiere_multiples_acciones(texto_original):
+        descartadas = acciones[1:]
+        print(f"[IA] Se descartaron {len(descartadas)} acción(es) extra no "
+              f"solicitada(s) (sin conector de secuencia en el texto original): "
+              f"{descartadas}")
+        acciones = acciones[:1]
+
+    if len(acciones) > MAX_ACCIONES_POR_TURNO:
+        print(f"[IA] Se truncaron las acciones a {MAX_ACCIONES_POR_TURNO} "
+              f"(la IA devolvió {len(acciones)})")
+        acciones = acciones[:MAX_ACCIONES_POR_TURNO]
+
     return acciones
 
 
@@ -238,7 +314,20 @@ maximizar_app|app       crear_recordatorio|t|d media_silenciar|
                         ayuda|                   conversion_unidades|expr
                         terminar_sesion|
 
-Reglas: "eso"/"eso"/"el otro" → usar contexto. Múltiples → múltiples líneas. Ninguna → ninguna
+Reglas:
+- "eso"/"esto"/"el otro" → usar contexto de la última app.
+- Solo escribí MÁS DE UNA línea si el usuario mencionó explícitamente
+  varias acciones en la MISMA frase (con "y", "luego", "después").
+  Si el usuario pidió UNA sola cosa, respondé UNA sola línea.
+- NUNCA inventes acciones que el usuario no mencionó, ni completes
+  una secuencia "porque tendría sentido" — solo lo que se pidió.
+- ayuda| es SOLO para cuando el usuario pide ayuda o capacidades de
+  forma directa (ej: "qué puedes hacer", "ayúdame", "qué comandos
+  tienes"). NO uses ayuda| para saludos, preguntas, charla casual,
+  chistes, opiniones, o cualquier cosa que no sea un comando de la
+  lista de arriba — en esos casos respondé "ninguna", sin excepción.
+- Si no hay ningún comando de la lista reconocible → "ninguna".
+
 Recordatorios: "10 minutos" o "15:30". Temporizadores: duración. Volumen: número.
 
 {contexto_memoria}
@@ -259,7 +348,7 @@ Usuario: {texto}"""
         _guardar_cache(texto, [])
         return []
 
-    acciones = parsear_salida(salida, ultima_app)
+    acciones = parsear_salida(salida, ultima_app, texto_original=texto)
     _guardar_cache(texto, acciones)
     return acciones
 
@@ -304,12 +393,107 @@ def _intentar_calculo_python(texto):
 
 
 # =========================================================
+# BANCO DE CHISTES — respaldo determinístico, sin pasar por la IA
+# =========================================================
+#
+# FIX/NUEVO: bug real reportado — pedir un chiste hacía que el
+# modelo, anclado al ÚNICO ejemplo de chiste que traía el prompt de
+# responder_charla (uno de programadores, sobre que octal 31 =
+# decimal 25 sale "Halloween = Navidad"), devolviera casi siempre
+# variaciones de ESE mismo chiste — un caso clásico de sobreajuste a
+# un few-shot con una sola muestra. Como encima ese chiste depende de
+# un juego de palabras técnico que un modelo chico no entiende de
+# verdad, las "variaciones" que generaba terminaban sin sentido ni
+# como chiste ni como dato.
+#
+# El humor —y más el humor con juego de palabras, dicho en voz alta
+# sin ningún apoyo visual con el que releer— es un terreno donde un
+# modelo chico/cuantizado no es confiable. Mismo principio que ya
+# aplica conversiones.py a las conversiones de unidades: mejor
+# resolver con algo determinístico que confiar en que el modelo
+# "improvise bien" — acá el equivalente es un banco curado de
+# chistes cortos en español, de temas variados (adrede, NO todos de
+# programadores), servidos con rotación para no repetir siempre el
+# mismo. La IA nunca genera el chiste en sí — solo detectamos que ESO
+# es lo que se pidió (ver _es_pedido_de_chiste) y respondemos directo
+# desde el banco, sin ninguna llamada al modelo de por medio (más
+# rápido, además de más confiable).
+# =========================================================
+
+CHISTES_BANCO = [
+    "¿Qué le dice un pez a otro pez? Nada.",
+    "¿Cómo se dice pared en inglés? Wall, pero da igual, la pared ni te escucha.",
+    "¿Qué hace una abeja en el gimnasio? Zum-ba.",
+    "¿Cómo llaman los esqueletos a su mejor amigo? No tienen, no tienen a nadie por dentro.",
+    "¿Por qué el libro de matemáticas está triste? Porque tiene demasiados problemas.",
+    "¿Qué le dijo un semáforo a otro? No me mires, me estoy cambiando.",
+    "¿Cuál es el animal más antiguo? La cebra, porque está en blanco y negro.",
+    "Fui a la ferretería a comprar un martillo y el vendedor me dijo: es un golpe seguro.",
+    "¿Por qué los pájaros no usan Facebook? Porque ya tienen Twitter.",
+    "¿Cómo se llama el campeón de buceo? Jack Manguera.",
+    "¿Cuál es el colmo de un jardinero? Que su novia lo deje plantado.",
+    "¿Qué le dice una impresora a otra? Esa hoja es tuya o es mía.",
+    "¿Cuál es el colmo de un electricista? Que le den buena onda y ni la sienta.",
+    "¿Por qué el tomate no sale con la lechuga? Porque no la considera fresca.",
+    "¿Cómo se despiden los químicos? Nos vemos, reacciones nunca faltan.",
+]
+
+_indice_rotacion_chistes = 0
+
+FRASES_PEDIDO_CHISTE = (
+    "cuéntame un chiste", "cuentame un chiste",
+    "dime un chiste", "dime uno chiste", "dime otro chiste",
+    "cuéntame algo gracioso", "cuentame algo gracioso",
+    "cuéntame un chiste bueno", "cuentame un chiste bueno",
+    "sabes algún chiste", "sabes algun chiste",
+    "cuéntame otro chiste", "cuentame otro chiste",
+    "hazme reír", "hazme reir",
+    "un chiste", "otro chiste",
+)
+
+
+def _es_pedido_de_chiste(texto):
+    texto = (texto or "").lower().strip()
+    return any(frase in texto for frase in FRASES_PEDIDO_CHISTE)
+
+
+def _elegir_chiste():
+    """
+    Rotación simple sobre CHISTES_BANCO (mismo patrón ya usado para
+    hotwords en voice.py, ver _construir_hotwords) — recorre la
+    lista entera antes de repetir cualquiera, en vez de un random
+    puro que podría devolver el mismo chiste dos veces seguidas.
+    """
+    global _indice_rotacion_chistes
+    chiste = CHISTES_BANCO[_indice_rotacion_chistes % len(CHISTES_BANCO)]
+    _indice_rotacion_chistes = (_indice_rotacion_chistes + 1) % len(CHISTES_BANCO)
+    return chiste
+
+
+_CIERRES_CASUALES = (
+    "¿Algo más?", "¿Te ayudo en algo más?",
+    "¿Querés que haga algo?", "¿Necesitás algo más?",
+)
+
+
+# =========================================================
 # RESPONDER CHARLA
 # =========================================================
 
 def responder_charla(texto):
     from memory import memoria, obtener_conversacion, obtener_hechos, CONVERSACION_MAX
     ultima_app = memoria.get("ultima_app", "")
+
+    # FIX/NUEVO: chistes resueltos con el banco curado de arriba, sin
+    # pasar por el modelo — ver el comentario detallado junto a
+    # CHISTES_BANCO. Se revisa ANTES del cálculo y de la llamada a la
+    # IA porque no tiene sentido gastar una llamada al modelo (con su
+    # latencia y su riesgo de generar algo sin sentido) para algo que
+    # ya se responde de forma confiable y variada sin él.
+    if _es_pedido_de_chiste(texto):
+        chiste = _elegir_chiste()
+        cierre = random.choice(_CIERRES_CASUALES)
+        return f"{chiste} {cierre}"
 
     resultado_calc, es_calculo = _intentar_calculo_python(texto)
     if es_calculo:
@@ -334,6 +518,14 @@ def responder_charla(texto):
         partes = [f"    - {k}: {v}" for k, v in hechos.items()]
         contexto_hechos = "\n".join(partes)
 
+    # FIX/NUEVO: se quitó el ejemplo de chiste de programadores de los
+    # EJEMPLOS DE TONO — ese input ("contame un chiste") ya nunca
+    # llega hasta acá (se resuelve arriba, con el banco curado), así
+    # que dejarlo como ejemplo solo servía para que el modelo se
+    # anclara a un chiste técnico que no le salía bien. Se reemplaza
+    # por un ejemplo de humor seco sin depender de un chiste armado,
+    # que sí es el tipo de tono que responder_charla() debe seguir
+    # generando (comentarios con onda, no chistes formales).
     prompt = f"""Eres Jarvis, el asistente personal de un usuario que te habla en español.
 No eres un chatbot genérico — eres eficiente, amigable, y tienes un toque de humor seco.
 Hablas como una persona real, no como un manual técnico. Tus respuestas son CORTAS
@@ -347,11 +539,15 @@ REGLAS DE ESTILO:
 - Si el texto del usuario viene mal transcrito (palabras sueltas sin sentido como
   "ya debes", "namas", "jerbys"), decile que no entendiste y que repita — pero
   hacelo con onda, no robótico.
+- NUNCA improvises un chiste armado (pregunta-respuesta, juego de palabras) —
+  si el usuario pide un chiste, ese caso se resuelve aparte, antes de llegar
+  a este prompt; si igual llegara acá, respondé con humor seco de una línea,
+  sin forzar una estructura de chiste.
 
 REGLAS DE CIERRE DE CONVERSACIÓN:
 - Si tu respuesta es un dato simple de 1-3 palabras (ej: "Tokio", "42", "sí", "de nada"),
   NO agregues ninguna pregunta de cierre. Respondé solo el dato.
-- Si tu respuesta es una explicación, chiste, opinión, o tiene más de 5 palabras,
+- Si tu respuesta es una explicación, opinión, o tiene más de 5 palabras,
   terminá con UNA SOLA pregunta corta y natural de cierre como:
   "¿Algo más?", "¿Te ayudo en algo más?", "¿Querés que haga algo?", "¿Necesitás algo más?".
   Elegí la que suene más natural según el contexto.
@@ -364,7 +560,7 @@ usuario: gracias → jarvis: de nada
 usuario: ya debes → jarvis: no te entendí bien, ¿podés repetirlo?
 usuario: cuál es la capital de Japón → jarvis: Tokio
 usuario: qué es la fotosíntesis → jarvis: es cómo las plantas hacen comida con luz solar. ¿Algo más?
-usuario: contame un chiste → jarvis: ¿por qué los programadores confunden Halloween y Navidad? Porque 31 OCT = 25 DEC. ¿Te ayudo en algo más?
+usuario: qué opinás de madrugar → jarvis: le tengo el mismo respeto que a un lunes. ¿Algo más?
 usuario: quién ganó el mundial 2022 → jarvis: Argentina, contra Francia en penales. Partidazo. ¿Querés que haga algo?
 """
 

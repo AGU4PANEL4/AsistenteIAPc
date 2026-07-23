@@ -30,7 +30,7 @@ const COLORES_SVG = {
   dormido:    { ojo: "#a78bfa", boca: "#a78bfa", borde: "#a78bfa", bg2: "#1a1730" },
 };
 
-// Colores motor identitarios (solo en modos normales)
+// Colores motor identitarios
 const COLORES_MOTOR = {
   "Groq":   "#2de6c0",
   "Ollama": "#f97316",
@@ -46,11 +46,55 @@ const TEXTOS_ESTADO = {
   dormido:    "Durmiendo...",
 };
 
+// =====================================================================
+// ANIMACIONES IDLE — 2 por estado, selección aleatoria
+// =====================================================================
+const ANIMACIONES_IDLE = {
+  inactivo:   ["idle-slow-blink", "idle-look-around"],
+  escuchando: ["idle-alert-scan", "idle-focus-nod"],
+  procesando: ["idle-think-wave", "idle-look-up"],
+  hablando:   ["idle-content-sigh", "idle-happy-bounce"],
+  buscando:   ["idle-scan-sweep", "idle-search-pulse"],
+  dormido:    ["idle-deep-snore", "idle-drowsy-peek"],
+};
+
+const DURACION_ANIMACION = {
+  "idle-slow-blink":    2500,
+  "idle-look-around":   2200,
+  "idle-alert-scan":    1500,
+  "idle-focus-nod":     1800,
+  "idle-think-wave":    2000,
+  "idle-look-up":       2000,
+  "idle-content-sigh":  2500,
+  "idle-happy-bounce":  1200,
+  "idle-scan-sweep":    1500,
+  "idle-search-pulse":  2000,
+  "idle-deep-snore":    2500,
+  "idle-drowsy-peek":   3000,
+};
+
 let catFlotanteActual = null;
 let firmasPrevias = {};
-let estadoOrbe = { modo: "inactivo", noMolestar: false, orbFase: 0, zFase: 0, parpadeoCuenta: 30, ojosCerrados: false };
+let estadoOrbe = { modo: "inactivo", noMolestar: false, orbFase: 0, zFase: 0, parpadeoCuenta: 30, ojosCerrados: false, hoverOrbe: false };
 let modoAnterior = "inactivo";
 let tickActivo = false;
+let bocaAnimId = null;
+let aliasGruposExpandidos = {};
+
+// Idle animation state
+let idleState = {
+  ultimaActividad: 0,
+  timerId: null,
+  animando: false,
+  claseActual: null,
+};
+
+// Dizzy / mareo state
+let dizzyState = {
+  activo: false,
+  timerRecuperacion: null,
+  eraDormido: false,
+};
 
 function randInt(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
 
@@ -61,105 +105,277 @@ function expandirPanel() {
 function colapsarPanel() {
   document.getElementById("panel").classList.remove("expandido");
   document.getElementById("panel").classList.add("colapsando");
-  pywebview.api.colapsar().catch(() => {});
+  pywebview.api.colapsar().catch(function() {});
 }
 
-// ═══════════════════════════════════════════════════════════════════
+// =====================================================================
 // PALETA
-// ═══════════════════════════════════════════════════════════════════
+// =====================================================================
 function aplicarPaleta(paleta) {
   const root = document.documentElement;
-  for (const [key, val] of Object.entries(paleta)) root.style.setProperty(key, val);
+  for (const key in paleta) {
+    root.style.setProperty(key, paleta[key]);
+  }
 }
 function restaurarPaletaBase() { aplicarPaleta(PALETA_BASE); }
 function aplicarPaletaDormido() { aplicarPaleta(PALETA_DORMIDO); }
 
-// ═══════════════════════════════════════════════════════════════════
-// ORBE
-// ═══════════════════════════════════════════════════════════════════
+// =====================================================================
+// SISTEMA DE ANIMACIONES IDLE
+// =====================================================================
+
+function resetIdleTimer() {
+  idleState.ultimaActividad = performance.now();
+  if (idleState.timerId) {
+    clearTimeout(idleState.timerId);
+    idleState.timerId = null;
+  }
+  if (idleState.animando && idleState.claseActual) {
+    const wrap = document.getElementById("orbe-wrap");
+    if (wrap) wrap.classList.remove(idleState.claseActual);
+    idleState.animando = false;
+    idleState.claseActual = null;
+  }
+  programarProximaIdle();
+}
+
+function programarProximaIdle() {
+  if (idleState.timerId) clearTimeout(idleState.timerId);
+  const delay = randInt(3000, 8000);
+  idleState.timerId = setTimeout(ejecutarIdleAleatoria, delay);
+}
+
+function ejecutarIdleAleatoria() {
+  if (idleState.animando || dizzyState.activo) return;
+
+  const modo = estadoOrbe.modo;
+  const anims = ANIMACIONES_IDLE[modo];
+  if (!anims || anims.length === 0) {
+    programarProximaIdle();
+    return;
+  }
+
+  const claseAnim = anims[randInt(0, anims.length - 1)];
+  const duracion = DURACION_ANIMACION[claseAnim] || 2000;
+
+  const wrap = document.getElementById("orbe-wrap");
+  if (!wrap) {
+    programarProximaIdle();
+    return;
+  }
+
+  idleState.animando = true;
+  idleState.claseActual = claseAnim;
+  wrap.classList.add(claseAnim);
+
+  setTimeout(function() {
+    wrap.classList.remove(claseAnim);
+    idleState.animando = false;
+    idleState.claseActual = null;
+    programarProximaIdle();
+  }, duracion);
+}
+
+// =====================================================================
+// SISTEMA DE MAREO / DIZZY (arrastre rápido)
+// =====================================================================
+
+function triggerDizzy() {
+  if (dizzyState.activo) return; // Ya está mareado
+
+  const wrap = document.getElementById("orbe-wrap");
+  if (!wrap) return;
+
+  dizzyState.activo = true;
+  dizzyState.eraDormido = estadoOrbe.modo === "dormido";
+  dizzyState.modoOriginal = estadoOrbe.modo; // Guardar modo original para colores
+
+  // Aplicar clase de mareo
+  wrap.classList.add("dizzy-active");
+
+  // Actualizar colores de las espirales según el modo ORIGINAL (no cambiar paleta)
+  const c = COLORES_SVG[dizzyState.modoOriginal] || COLORES_SVG.inactivo;
+  const spiralIzq = document.querySelector("#spiral-izq path");
+  const spiralDer = document.querySelector("#spiral-der path");
+  if (spiralIzq) spiralIzq.setAttribute("stroke", c.ojo);
+  if (spiralDer) spiralDer.setAttribute("stroke", c.ojo);
+
+  // Actualizar color de la boca dizzy también
+  const bDizzy = document.getElementById("boca-dizzy");
+  if (bDizzy) bDizzy.setAttribute("stroke", c.boca);
+
+  // Ocultar Z's durante el mareo (se despertó momentáneamente)
+  const zFlot = document.getElementById("z-flotantes");
+  if (zFlot) zFlot.style.display = "none";
+
+  // Cancelar cualquier idle animation en curso
+  if (idleState.animando && idleState.claseActual) {
+    wrap.classList.remove(idleState.claseActual);
+    idleState.animando = false;
+    idleState.claseActual = null;
+  }
+  if (idleState.timerId) {
+    clearTimeout(idleState.timerId);
+    idleState.timerId = null;
+  }
+
+  // Estado texto: mareo
+  const estadoTexto = document.getElementById("orbe-estado-texto");
+  if (estadoTexto) estadoTexto.textContent = "¡Uy!";
+
+  // Después de 2.5s, recuperarse
+  dizzyState.timerRecuperacion = setTimeout(function() {
+    wrap.classList.remove("dizzy-active");
+    dizzyState.activo = false;
+
+    // Restaurar Z's si estaba dormido
+    if (dizzyState.eraDormido) {
+      const zFlot = document.getElementById("z-flotantes");
+      if (zFlot) zFlot.style.display = "block";
+    }
+
+    dizzyState.eraDormido = false;
+    dizzyState.modoOriginal = null;
+
+    actualizarOrbeVisual();
+    programarProximaIdle();
+  }, 2500);
+}
+
+// =====================================================================
+// ORBE VISUAL
+// =====================================================================
+
 function actualizarOrbeVisual() {
   const modo = estadoOrbe.modo;
   const c = COLORES_SVG[modo] || COLORES_SVG.inactivo;
   const noMolestar = estadoOrbe.noMolestar;
 
-  // Paleta del panel
   if (modo === "dormido" && modoAnterior !== "dormido") aplicarPaletaDormido();
   else if (modo !== "dormido" && modoAnterior === "dormido") restaurarPaletaBase();
   modoAnterior = modo;
 
-  // Clases
   const circulo = document.getElementById("orbe-circulo");
   const estadoTexto = document.getElementById("orbe-estado-texto");
   const metricas = document.getElementById("metricas");
   if (circulo) circulo.className = "estado-" + modo;
-  if (estadoTexto) estadoTexto.className = "estado-" + modo;
+  if (estadoTexto && !dizzyState.activo) estadoTexto.className = "estado-" + modo;
   if (metricas) metricas.className = "estado-" + modo;
 
-  // Circulo base
   const base = document.getElementById("orbe-base");
   if (base) { base.setAttribute("fill", c.bg2); base.setAttribute("stroke", c.borde); }
 
-  // Ojos
-  const ojoIzq = document.getElementById("ojo-izq");
-  const ojoDer = document.getElementById("ojo-der");
-  const ojoIzqC = document.getElementById("ojo-izq-cerrado");
-  const ojoDerC = document.getElementById("ojo-der-cerrado");
+  // === OJOS ===
+  const ojosAbiertos = document.getElementById("ojos-abiertos");
+  const ojosCerrados = document.getElementById("ojos-cerrados");
+  const ojosDrowsy = document.getElementById("ojos-drowsy");
+  const ojosSpiral = document.getElementById("ojos-spiral");
+  const pupilaIzq = document.getElementById("pupila-izq");
+  const pupilaDer = document.getElementById("pupila-der");
+  const cerradoIzq = document.getElementById("cerrado-izq");
+  const cerradoDer = document.getElementById("cerrado-der");
+  const drowsyIzq = document.getElementById("drowsy-izq");
+  const drowsyDer = document.getElementById("drowsy-der");
 
-  if (modo === "dormido") {
-    if (ojoIzq) ojoIzq.style.display = "none";
-    if (ojoDer) ojoDer.style.display = "none";
-    if (ojoIzqC) { ojoIzqC.style.display = "block"; ojoIzqC.setAttribute("stroke", c.ojo); }
-    if (ojoDerC) { ojoDerC.style.display = "block"; ojoDerC.setAttribute("stroke", c.ojo); }
-  } else {
-    if (estadoOrbe.ojosCerrados) {
-      if (ojoIzq) ojoIzq.style.display = "none";
-      if (ojoDer) ojoDer.style.display = "none";
-      if (ojoIzqC) { ojoIzqC.style.display = "block"; ojoIzqC.setAttribute("stroke", c.ojo); }
-      if (ojoDerC) { ojoDerC.style.display = "block"; ojoDerC.setAttribute("stroke", c.ojo); }
-    } else {
-      if (ojoIzq) { ojoIzq.style.display = "block"; ojoIzq.setAttribute("fill", c.ojo); }
-      if (ojoDer) { ojoDer.style.display = "block"; ojoDer.setAttribute("fill", c.ojo); }
-      if (ojoIzqC) ojoIzqC.style.display = "none";
-      if (ojoDerC) ojoDerC.style.display = "none";
-    }
-  }
+  const ojosVisibles = !estadoOrbe.ojosCerrados && modo !== "dormido";
 
-  // Boca
+  if (ojosAbiertos) ojosAbiertos.style.display = ojosVisibles ? "block" : "none";
+  if (ojosCerrados) ojosCerrados.style.display = (modo === "dormido" || estadoOrbe.ojosCerrados) ? "block" : "none";
+  if (ojosDrowsy) ojosDrowsy.style.display = "none";
+  if (ojosSpiral) ojosSpiral.style.display = "none";
+
+  const colorOjo = c.ojo;
+  if (pupilaIzq) pupilaIzq.setAttribute("fill", colorOjo);
+  if (pupilaDer) pupilaDer.setAttribute("fill", colorOjo);
+  if (cerradoIzq) cerradoIzq.setAttribute("stroke", colorOjo);
+  if (cerradoDer) cerradoDer.setAttribute("stroke", colorOjo);
+  if (drowsyIzq) drowsyIzq.setAttribute("stroke", colorOjo);
+  if (drowsyDer) drowsyDer.setAttribute("stroke", colorOjo);
+
+  const brilloIzq = document.getElementById("brillo-izq");
+  const brilloDer = document.getElementById("brillo-der");
+  const mostrarBrillo = estadoOrbe.hoverOrbe || modo === "escuchando" || modo === "hablando";
+  if (brilloIzq) brilloIzq.style.display = (ojosVisibles && mostrarBrillo) ? "block" : "none";
+  if (brilloDer) brilloDer.style.display = (ojosVisibles && mostrarBrillo) ? "block" : "none";
+
+  // === BOCA ===
   const bNeutra = document.getElementById("boca-neutra");
   const bHablando = document.getElementById("boca-hablando");
   const bEscuchando = document.getElementById("boca-escuchando");
   const bDormido = document.getElementById("boca-dormido");
+  const bSonrisa = document.getElementById("boca-sonrisa");
+  const bDizzy = document.getElementById("boca-dizzy");
 
   if (bNeutra) bNeutra.style.display = "none";
   if (bHablando) bHablando.style.display = "none";
   if (bEscuchando) bEscuchando.style.display = "none";
   if (bDormido) { bDormido.style.display = "none"; bDormido.classList.remove("respirando"); }
+  if (bSonrisa) bSonrisa.style.display = "none";
+  if (bDizzy) bDizzy.style.display = "none";
 
-  if (modo === "hablando") {
-    if (bHablando) { bHablando.style.display = "block"; bHablando.setAttribute("stroke", c.boca); }
+  if (bocaAnimId) cancelAnimationFrame(bocaAnimId);
+  bocaAnimId = null;
+
+  if (dizzyState.activo) {
+    // MODO MAREO: boca zigzag con color del estado
+    if (bDizzy) {
+      bDizzy.style.display = "block";
+      bDizzy.setAttribute("stroke", c.boca);
+    }
+  } else if (estadoOrbe.hoverOrbe && modo === "inactivo") {
+    if (bSonrisa) { bSonrisa.style.display = "block"; bSonrisa.setAttribute("stroke", c.boca); }
+  } else if (modo === "hablando") {
+    if (bHablando) { bHablando.style.display = "block"; bHablando.setAttribute("stroke", c.boca); animarBocaHablando(bHablando, c.boca); }
   } else if (modo === "escuchando") {
     if (bEscuchando) { bEscuchando.style.display = "block"; bEscuchando.setAttribute("fill", c.boca); }
   } else if (modo === "dormido") {
     if (bDormido) { bDormido.style.display = "block"; bDormido.setAttribute("fill", c.boca); bDormido.classList.add("respirando"); }
   } else {
-    if (bNeutra) { bNeutra.style.display = "block"; bNeutra.setAttribute("stroke", c.boca); }
+    if (bNeutra) { bNeutra.style.display = "block"; bNeutra.setAttribute("stroke", c.boca); animarBocaNeutra(bNeutra, c.boca); }
   }
 
-  // Z flotantes
   const zFlot = document.getElementById("z-flotantes");
   if (zFlot) zFlot.style.display = modo === "dormido" ? "block" : "none";
 
-  // DND
   const dnd = document.getElementById("dnd-indicador");
   if (dnd) dnd.style.display = noMolestar ? "block" : "none";
 
-  // Texto estado
-  if (estadoTexto) estadoTexto.textContent = TEXTOS_ESTADO[modo] || modo;
+  if (estadoTexto && !dizzyState.activo) estadoTexto.textContent = TEXTOS_ESTADO[modo] || modo;
 }
 
-// ═══════════════════════════════════════════════════════════════════
+// === ANIMACIONES DE BOCA ===
+
+function animarBocaNeutra(pathEl, color) {
+  function tick() {
+    const t = performance.now() / 1000;
+    const curvatura = Math.sin(t * 1.5) * 1.5;
+    const yControl = 55 + curvatura;
+    pathEl.setAttribute("d", "M 44 55 Q 48 " + yControl.toFixed(1) + " 52 55");
+    pathEl.setAttribute("stroke", color);
+    bocaAnimId = requestAnimationFrame(tick);
+  }
+  tick();
+}
+
+function animarBocaHablando(pathEl, color) {
+  function tick() {
+    const t = performance.now() / 1000;
+    const amp = (Math.sin(t * 0.7) + 1) / 2;
+    const apertura = 3 + amp * 5;
+    const ancho = 5 + Math.sin(t * 2.3) * 1.5;
+    const yBase = 55;
+    const yControl = yBase + apertura;
+    pathEl.setAttribute("d", "M " + (48 - ancho).toFixed(1) + " " + (yBase - apertura * 0.3).toFixed(1) + " Q 48 " + yControl.toFixed(1) + " " + (48 + ancho).toFixed(1) + " " + (yBase - apertura * 0.3).toFixed(1));
+    pathEl.setAttribute("stroke", color);
+    bocaAnimId = requestAnimationFrame(tick);
+  }
+  tick();
+}
+
+// =====================================================================
 // TICK ORBE
-// ═══════════════════════════════════════════════════════════════════
+// =====================================================================
+
 let lastTick = 0;
 function tickOrbe(ts) {
   if (!tickActivo) return;
@@ -167,10 +383,18 @@ function tickOrbe(ts) {
     lastTick = ts;
     estadoOrbe.orbFase = (estadoOrbe.orbFase + 0.18) % (2 * Math.PI);
     estadoOrbe.zFase = (estadoOrbe.zFase + 0.03) % (2 * Math.PI);
-    if (estadoOrbe.modo !== "dormido") {
-      estadoOrbe.parpadeoCuenta -= 1;
-      if (estadoOrbe.parpadeoCuenta <= -3) { estadoOrbe.ojosCerrados = false; estadoOrbe.parpadeoCuenta = randInt(30, 90); }
-      else if (estadoOrbe.parpadeoCuenta <= 0) estadoOrbe.ojosCerrados = true;
+
+    if (estadoOrbe.modo !== "dormido" || dizzyState.activo) {
+      // Parpadeo normal solo si no está dormido (o si está mareado)
+      if (!dizzyState.activo) {
+        estadoOrbe.parpadeoCuenta -= 1;
+        if (estadoOrbe.parpadeoCuenta <= -3) {
+          estadoOrbe.ojosCerrados = false;
+          estadoOrbe.parpadeoCuenta = randInt(50, 150);
+        } else if (estadoOrbe.parpadeoCuenta <= 0) {
+          estadoOrbe.ojosCerrados = true;
+        }
+      }
     } else {
       estadoOrbe.ojosCerrados = true;
     }
@@ -192,7 +416,7 @@ function programarParpadeoMini() {
   if (!ojoI || !ojoD) return;
   ojoI.classList.add("cerrado");
   ojoD.classList.add("cerrado");
-  setTimeout(() => {
+  setTimeout(function() {
     ojoI.classList.remove("cerrado");
     ojoD.classList.remove("cerrado");
     setTimeout(programarParpadeoMini, 2000 + Math.random() * 3000);
@@ -206,29 +430,58 @@ function actualizarMiniBoca(modo) {
   else boca.setAttribute("d", "M 8.5 17.5 L 13.5 17.5");
 }
 
-// Arrastre
+// =====================================================================
+// ARRASTRE CON DETECCIÓN DE VELOCIDAD (Mareo)
+// =====================================================================
 (function habilitarArrastre() {
   const header = document.getElementById("header");
   if (!header) return;
-  let arrastrando = false, x0 = 0, y0 = 0;
-  header.addEventListener("mousedown", (e) => {
+  let arrastrando = false, x0 = 0, y0 = 0, ultimoX = 0, ultimoY = 0, ultimoTiempo = 0;
+  const UMBRAL_VELOCIDAD = 25; // px por frame = movimiento rápido
+
+  header.addEventListener("mousedown", function(e) {
     if (e.target.closest("button, #mini-orbe")) return;
-    arrastrando = true; x0 = e.screenX; y0 = e.screenY;
-  });
-  window.addEventListener("mousemove", (e) => {
-    if (!arrastrando) return;
-    const dx = e.screenX - x0, dy = e.screenY - y0;
+    arrastrando = true;
     x0 = e.screenX; y0 = e.screenY;
-    pywebview.api.mover_ventana(dx, dy);
+    ultimoX = e.screenX; ultimoY = e.screenY;
+    ultimoTiempo = performance.now();
   });
-  window.addEventListener("mouseup", () => { arrastrando = false; });
+
+  window.addEventListener("mousemove", function(e) {
+    if (!arrastrando) return;
+
+    const ahora = performance.now();
+    const dt = ahora - ultimoTiempo;
+    const dx = e.screenX - ultimoX;
+    const dy = e.screenY - ultimoY;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+
+    // Detectar movimiento rápido
+    if (dt > 0 && dist / dt * 16 > UMBRAL_VELOCIDAD) {
+      triggerDizzy();
+    }
+
+    ultimoX = e.screenX;
+    ultimoY = e.screenY;
+    ultimoTiempo = ahora;
+
+    // Mover ventana
+    const dwx = e.screenX - x0;
+    const dwy = e.screenY - y0;
+    x0 = e.screenX; y0 = e.screenY;
+    pywebview.api.mover_ventana(dwx, dwy);
+  });
+
+  window.addEventListener("mouseup", function() { arrastrando = false; });
 })();
 
-// Categorias
+// =====================================================================
+// CATEGORIAS
+// =====================================================================
 async function abrirCategoria(cat) {
   if (catFlotanteActual === cat) { cerrarFlotante(); return; }
   catFlotanteActual = cat;
-  document.querySelectorAll(".cat-card").forEach(c => c.classList.remove("abierta"));
+  document.querySelectorAll(".cat-card").forEach(function(c) { c.classList.remove("abierta"); });
   const catEl = document.getElementById("cat-" + cat);
   if (catEl) catEl.classList.add("abierta");
   const ft = document.getElementById("flotante-titulo");
@@ -237,45 +490,183 @@ async function abrirCategoria(cat) {
   document.getElementById("flotante").classList.add("activo");
   await refrescarListaFlotante();
 }
+
+// =====================================================================
+// FILA ITEM
+// =====================================================================
+function crearFilaItem(it, categoria) {
+  const fila = document.createElement("div");
+  fila.className = "fila-item";
+  fila.dataset.clave = it.clave;
+  fila.dataset.cat = categoria;
+
+  let html = '<div><div class="txt">' + escapeHtml(it.principal) + '</div>';
+  if (it.secundario) html += '<div class="sub">' + escapeHtml(it.secundario) + '</div>';
+  html += '</div>';
+  html += '<button class="btn-borrar" title="quitar">×</button>';
+  fila.innerHTML = html;
+
+  const btn = fila.querySelector(".btn-borrar");
+
+  btn.onclick = function(e) {
+    e.stopPropagation();
+
+    if (fila.classList.contains("confirmar-borrado")) {
+      fila.classList.remove("confirmar-borrado");
+      fila.classList.add("desvaneciendo");
+
+      setTimeout(async function() {
+        try {
+          await pywebview.api.eliminar_item(categoria, it.clave);
+        } catch (err) {}
+
+        const grupoDiv = fila.closest(".alias-grupo");
+        if (grupoDiv) {
+          const conteoEl = grupoDiv.querySelector(".alias-grupo-conteo");
+          const listaEl = grupoDiv.querySelector(".alias-grupo-lista");
+          if (conteoEl && listaEl) {
+            const nuevasFilas = listaEl.querySelectorAll(".fila-item:not(.desvaneciendo)");
+            const nuevoConteo = nuevasFilas.length;
+            conteoEl.textContent = nuevoConteo;
+
+            if (nuevoConteo === 0) {
+              grupoDiv.style.transition = "opacity 0.3s ease, max-height 0.3s ease";
+              grupoDiv.style.opacity = "0";
+              grupoDiv.style.maxHeight = "0";
+              grupoDiv.style.overflow = "hidden";
+              setTimeout(function() {
+                grupoDiv.remove();
+              }, 300);
+            }
+          }
+        }
+
+        fila.remove();
+        refrescarCategorias();
+      }, 250);
+    } else {
+      const cont = document.getElementById("flotante-lista");
+      if (cont) {
+        cont.querySelectorAll(".confirmar-borrado").forEach(function(otra) {
+          otra.classList.remove("confirmar-borrado");
+          const otroBtn = otra.querySelector(".btn-borrar");
+          if (otroBtn) otroBtn.textContent = "×";
+        });
+      }
+
+      fila.classList.add("confirmar-borrado");
+      btn.textContent = "🗑";
+    }
+  };
+
+  return fila;
+}
+
+// =====================================================================
+// LISTA FLOTANTE
+// =====================================================================
 async function refrescarListaFlotante() {
   if (!catFlotanteActual) return;
   const items = await pywebview.api.listar_categoria(catFlotanteActual);
   const cont = document.getElementById("flotante-lista");
   cont.innerHTML = "";
-  if (!items.length) { cont.innerHTML = '<div class="hist-vacio">Nada por aca todavia.</div>'; return; }
+
+  if (!items.length) {
+    cont.innerHTML = '<div class="hist-vacio">Nada por aca todavia.</div>';
+    return;
+  }
+
+  if (catFlotanteActual === "alias") {
+    renderAliasAgrupados(cont, items);
+    return;
+  }
+
   for (const it of items) {
-    const fila = document.createElement("div");
-    fila.className = "fila-item";
-    fila.innerHTML = '<div><div class="txt">' + escapeHtml(it.principal) + '</div>' + (it.secundario ? '<div class="sub">' + escapeHtml(it.secundario) + '</div>' : "") + '</div><button title="quitar">×</button>';
-    fila.querySelector("button").onclick = async () => { await pywebview.api.eliminar_item(catFlotanteActual, it.clave); await refrescarListaFlotante(); await refrescarCategorias(); };
+    const fila = crearFilaItem(it, catFlotanteActual);
     cont.appendChild(fila);
   }
 }
+
+function renderAliasAgrupados(cont, items) {
+  const grupos = {};
+  for (const it of items) {
+    const app = it.secundario || "Sin app";
+    if (!grupos[app]) grupos[app] = [];
+    grupos[app].push(it);
+  }
+
+  const appsOrdenadas = Object.keys(grupos).sort(function(a, b) { return a.localeCompare(b); });
+
+  for (const app of appsOrdenadas) {
+    const aliasList = grupos[app];
+    const expandido = aliasGruposExpandidos[app] !== false;
+
+    const grupoDiv = document.createElement("div");
+    grupoDiv.className = "alias-grupo";
+
+    const cabecera = document.createElement("div");
+    cabecera.className = "alias-grupo-cabecera";
+    cabecera.innerHTML = '<span class="alias-grupo-toggle">' + (expandido ? "▼" : "▶") + '</span>' +
+      '<span class="alias-grupo-nombre">' + escapeHtml(app) + '</span>' +
+      '<span class="alias-grupo-conteo">' + aliasList.length + '</span>';
+
+    const listaDiv = document.createElement("div");
+    listaDiv.className = "alias-grupo-lista";
+    listaDiv.style.display = expandido ? "block" : "none";
+
+    cabecera.onclick = function() {
+      const estaExpandido = listaDiv.style.display !== "none";
+      listaDiv.style.display = estaExpandido ? "none" : "block";
+      cabecera.querySelector(".alias-grupo-toggle").textContent = estaExpandido ? "▶" : "▼";
+      aliasGruposExpandidos[app] = !estaExpandido;
+    };
+
+    for (const it of aliasList) {
+      const fila = crearFilaItem(it, "alias");
+      listaDiv.appendChild(fila);
+    }
+
+    grupoDiv.appendChild(cabecera);
+    grupoDiv.appendChild(listaDiv);
+    cont.appendChild(grupoDiv);
+  }
+}
+
 function cerrarFlotante() {
   catFlotanteActual = null;
-  document.querySelectorAll(".cat-card").forEach(c => c.classList.remove("abierta"));
+  document.querySelectorAll(".cat-card").forEach(function(c) { c.classList.remove("abierta"); });
   document.getElementById("overlay").classList.remove("activo");
   document.getElementById("flotante").classList.remove("activo");
 }
-function escapeHtml(s) { return (s || "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"})[c]); }
+function escapeHtml(s) {
+  if (!s) return "";
+  var map = {"&":"&amp;","<":"&lt;",">":"&gt;"};
+  map['"'] = "&quot;";
+  return s.replace(/[&<>"]/g, function(c) {
+    return map[c];
+  });
+}
 
 function renderCategoriasBase() {
   const grid = document.getElementById("categorias");
   grid.innerHTML = "";
-  for (const cat of Object.keys(CATEGORIAS)) {
+  for (const cat in CATEGORIAS) {
     const meta = CATEGORIAS[cat];
     const card = document.createElement("div");
     card.className = "cat-card";
     card.id = "cat-" + cat;
     card.style.setProperty("--cat-color", meta.color);
-    card.onclick = () => abrirCategoria(cat);
-    card.innerHTML = '<div class="cat-cabecera"><span class="cat-icono">' + meta.icono + '</span><span class="cat-nombre">' + meta.nombre + '</span><span class="cat-conteo" id="conteo-' + cat + '">0</span></div><div class="cat-resumen" id="resumen-' + cat + '">—</div>';
+    card.onclick = function() { abrirCategoria(cat); };
+    card.innerHTML = '<div class="cat-cabecera"><span class="cat-icono">' + meta.icono +
+      '</span><span class="cat-nombre">' + meta.nombre +
+      '</span><span class="cat-conteo" id="conteo-' + cat + '">0</span></div>' +
+      '<div class="cat-resumen" id="resumen-' + cat + '">—</div>';
     grid.appendChild(card);
   }
 }
 async function refrescarCategorias() {
   const resumen = await pywebview.api.resumen_categorias();
-  for (const cat of Object.keys(CATEGORIAS)) {
+  for (const cat in CATEGORIAS) {
     const datos = resumen[cat] || { conteo: 0, lineas: [] };
     const ce = document.getElementById("conteo-" + cat);
     const re = document.getElementById("resumen-" + cat);
@@ -288,24 +679,34 @@ async function refrescarCategorias() {
     }
     firmasPrevias[cat] = firma;
   }
-  if (catFlotanteActual) refrescarListaFlotante();
+  if (catFlotanteActual && catFlotanteActual !== "alias") {
+    refrescarListaFlotante();
+  }
 }
 
 async function refrescarHistorial() {
   const items = await pywebview.api.historial();
   const cont = document.getElementById("historial-lista");
-  if (!items.length) { cont.innerHTML = '<div class="hist-vacio">Todavia no hay comandos.<br>Deci "jarvis" para empezar.</div>'; return; }
-  cont.innerHTML = items.slice().reverse().map(h => {
+  if (!items.length) {
+    cont.innerHTML = '<div class="hist-vacio">Todavia no hay comandos.<br>Deci "jarvis" para empezar.</div>';
+    return;
+  }
+  let html = "";
+  for (let i = 0; i < items.length; i++) {
+    const h = items[i];
     const ts = escapeHtml(h.ts || ""), cmd = escapeHtml(h.cmd || ""), resp = escapeHtml(h.resp || "");
-    let linea = '<div class="hist-item" style="color:var(--acento)">  ' + ts + '  ›  ' + cmd + '</div>';
-    if (resp) linea += '<div class="hist-item" style="color:var(--texto);padding-left:14px">      ' + (resp.length > 38 ? resp.slice(0, 38) + "…" : resp) + '</div>';
-    return linea;
-  }).join("");
+    html += '<div class="hist-item" style="color:var(--acento)">  ' + ts + '  ›  ' + cmd + '</div>';
+    if (resp) {
+      html += '<div class="hist-item" style="color:var(--texto);padding-left:14px">      ' +
+        (resp.length > 38 ? resp.slice(0, 38) + "…" : resp) + '</div>';
+    }
+  }
+  cont.innerHTML = html;
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// ESTADO — motor tematizado segun modo
-// ═══════════════════════════════════════════════════════════════════
+// =====================================================================
+// ESTADO
+// =====================================================================
 async function refrescarEstado() {
   let e;
   try { e = await pywebview.api.get_estado(); } catch (err) { return; }
@@ -314,20 +715,21 @@ async function refrescarEstado() {
   estadoOrbe.modo = e.modo;
   estadoOrbe.noMolestar = e.no_molestar;
 
-  if (e.modo !== modoPrev) actualizarOrbeVisual();
+  if (e.modo !== modoPrev) {
+    actualizarOrbeVisual();
+    resetIdleTimer();
+  }
 
-  // Header
   const hm = document.getElementById("header-modo");
   const hs = document.getElementById("header-sub");
   const hmo = document.getElementById("header-motor");
   if (hm) hm.textContent = e.texto_modo;
   if (hs) hs.textContent = e.motor + " · " + e.wake_word;
 
-  // MOTOR TEMATIZADO:
-  // - En modo dormido: usa var(--acento) que es morado
-  // - En modos normales: usa color identitario del motor
   const esDormido = e.modo === "dormido";
-  const colorMotor = esDormido ? getComputedStyle(document.documentElement).getPropertyValue("--acento").trim() : (COLORES_MOTOR[e.motor] || COLORES_MOTOR["—"]);
+  const colorMotor = esDormido
+    ? getComputedStyle(document.documentElement).getPropertyValue("--acento").trim()
+    : (COLORES_MOTOR[e.motor] || COLORES_MOTOR["—"]);
 
   if (hmo) {
     hmo.textContent = e.motor;
@@ -336,7 +738,6 @@ async function refrescarEstado() {
     hmo.style.boxShadow = "0 0 8px " + hexToRgba(colorMotor, 0.25);
   }
 
-  // Métricas
   const mw = document.getElementById("m-wake");
   const mm = document.getElementById("m-motor");
   const md = document.getElementById("m-dnd");
@@ -354,18 +755,115 @@ function hexToRgba(hex, alpha) {
   return "rgba(" + r + "," + g + "," + b + "," + alpha + ")";
 }
 
-// ═══════════════════════════════════════════════════════════════════
+// =====================================================================
 // INICIO
-// ═══════════════════════════════════════════════════════════════════
+// =====================================================================
 async function iniciarLoops() {
   await refrescarEstado();
   await refrescarCategorias();
   await refrescarHistorial();
   actualizarOrbeVisual();
   setInterval(refrescarEstado, 400);
-  setInterval(() => { refrescarCategorias(); refrescarHistorial(); }, 1200);
+  setInterval(function() { refrescarCategorias(); refrescarHistorial(); }, 1200);
   iniciarTickOrbe();
   programarParpadeoMini();
+  iniciarTrackingOrbe();
+  resetIdleTimer();
+}
+
+// =====================================================================
+// TRACKING DEL ORBE
+// =====================================================================
+
+function iniciarTrackingOrbe() {
+  const orbeWrap = document.getElementById("orbe-wrap");
+  const orbeSvg = document.getElementById("orbe-svg");
+  if (!orbeWrap || !orbeSvg) return;
+
+  const pupilaIzq = document.getElementById("pupila-izq");
+  const pupilaDer = document.getElementById("pupila-der");
+  const brilloIzq = document.getElementById("brillo-izq");
+  const brilloDer = document.getElementById("brillo-der");
+
+  const baseIzq = { x: 39, y: 45 };
+  const baseDer = { x: 57, y: 45 };
+  const brilloOffset = { x: 1.2, y: -1.2 };
+  const radioMaximo = 2.2;
+
+  orbeWrap.addEventListener("mouseenter", function() {
+    if (estadoOrbe.modo === "dormido" && !dizzyState.activo) return;
+    estadoOrbe.hoverOrbe = true;
+    resetIdleTimer();
+    actualizarOrbeVisual();
+  });
+
+  orbeWrap.addEventListener("mouseleave", function() {
+    estadoOrbe.hoverOrbe = false;
+    if (pupilaIzq) {
+      pupilaIzq.style.transition = "cx 0.3s ease, cy 0.3s ease";
+      pupilaIzq.setAttribute("cx", baseIzq.x);
+      pupilaIzq.setAttribute("cy", baseIzq.y);
+      setTimeout(function() { if (pupilaIzq) pupilaIzq.style.transition = ""; }, 300);
+    }
+    if (pupilaDer) {
+      pupilaDer.style.transition = "cx 0.3s ease, cy 0.3s ease";
+      pupilaDer.setAttribute("cx", baseDer.x);
+      pupilaDer.setAttribute("cy", baseDer.y);
+      setTimeout(function() { if (pupilaDer) pupilaDer.style.transition = ""; }, 300);
+    }
+    if (brilloIzq) {
+      brilloIzq.setAttribute("cx", baseIzq.x + brilloOffset.x);
+      brilloIzq.setAttribute("cy", baseIzq.y + brilloOffset.y);
+    }
+    if (brilloDer) {
+      brilloDer.setAttribute("cx", baseDer.x + brilloOffset.x);
+      brilloDer.setAttribute("cy", baseDer.y + brilloOffset.y);
+    }
+    actualizarOrbeVisual();
+  });
+
+  orbeWrap.addEventListener("mousedown", function() {
+    if (estadoOrbe.modo === "dormido" && !dizzyState.activo) return;
+    resetIdleTimer();
+    if (pupilaIzq) pupilaIzq.setAttribute("r", "3.5");
+    if (pupilaDer) pupilaDer.setAttribute("r", "3.5");
+  });
+  orbeWrap.addEventListener("mouseup", function() {
+    if (estadoOrbe.modo === "dormido" && !dizzyState.activo) return;
+    if (pupilaIzq) pupilaIzq.setAttribute("r", "2.8");
+    if (pupilaDer) pupilaDer.setAttribute("r", "2.8");
+  });
+
+  orbeWrap.addEventListener("mousemove", function(e) {
+    if (!pupilaIzq || !pupilaDer) return;
+    if (estadoOrbe.modo === "dormido" && !dizzyState.activo) return;
+    if (estadoOrbe.ojosCerrados && !dizzyState.activo) return;
+
+    const rect = orbeSvg.getBoundingClientRect();
+    const mx = ((e.clientX - rect.left) / rect.width) * 96;
+    const my = ((e.clientY - rect.top) / rect.height) * 96;
+
+    function moverPupila(base, pupila, brillo) {
+      const dx = mx - base.x;
+      const dy = my - base.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      const maxDist = 40;
+      const factor = Math.min(dist / maxDist, 1);
+      const eased = factor * (2 - factor);
+      const angulo = Math.atan2(dy, dx);
+      const nx = base.x + Math.cos(angulo) * radioMaximo * eased;
+      const ny = base.y + Math.sin(angulo) * radioMaximo * eased;
+      pupila.setAttribute("cx", nx.toFixed(2));
+      pupila.setAttribute("cy", ny.toFixed(2));
+      if (brillo) {
+        brillo.setAttribute("cx", (nx + brilloOffset.x).toFixed(2));
+        brillo.setAttribute("cy", (ny + brilloOffset.y).toFixed(2));
+      }
+    }
+
+    moverPupila(baseIzq, pupilaIzq, brilloIzq);
+    moverPupila(baseDer, pupilaDer, brilloDer);
+  });
 }
 
 renderCategoriasBase();

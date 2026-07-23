@@ -81,8 +81,12 @@ class Api:
     def _resumen_alias(self):
         try:
             from aliases import listar_aliases
-            nombres = sorted(listar_aliases().keys())
-            return {"conteo": len(nombres), "lineas": [f"· {n[:14]}" for n in nombres[:2]]}
+            from collections import Counter
+            aliases = listar_aliases()
+            apps = Counter(aliases.values())
+            top_apps = apps.most_common(2)
+            lineas = [f"· {app[:12]} ({cnt})" for app, cnt in top_apps]
+            return {"conteo": len(aliases), "lineas": lineas}
         except Exception:
             return {"conteo": 0, "lineas": []}
 
@@ -121,8 +125,9 @@ class Api:
                 return out
             if cat == "alias":
                 from aliases import listar_aliases
-                out = [{"clave": a, "principal": a, "secundario": None}
-                       for a in sorted(listar_aliases().keys())]
+                out = []
+                for alias, app in sorted(listar_aliases().items()):
+                    out.append({"clave": alias, "principal": alias, "secundario": app})
                 return out
             if cat == "macros":
                 from macros import listar_macros
@@ -185,7 +190,7 @@ class Api:
     # el cálculo x = ox + ORBE_CANVAS - 340 da exactamente la posición
     # anterior del panel, sin saltos.
     def colapsar(self):
-        print("[WebUI] colapsar() llamado — ocultando ventana y mostrando orbe")
+        pass  # print("[WebUI] colapsar() llamado — ocultando ventana y mostrando orbe")
         
         try:
             if self._orbe is not None:
@@ -196,25 +201,25 @@ class Api:
                 ox = max(0, ox)
                 oy = max(0, oy)
                 self._orbe.mover_a(ox, oy)
-                print(f"[WebUI] Orbe movido a {ox},{oy} (alineado sup-derecha)")
+                pass  # print(f"[WebUI] Orbe movido a {ox},{oy} (alineado sup-derecha)")
         except Exception as e:
-            print(f"[WebUI] Error moviendo orbe: {e}")
+            pass  # print(f"[WebUI] Error moviendo orbe: {e}")
         
         try:
             self._window.hide()
-            print("[WebUI] window.hide() OK")
+            pass  # print("[WebUI] window.hide() OK")
         except Exception as e:
-            print(f"[WebUI] window.hide() falló: {e}")
+            pass  # print(f"[WebUI] window.hide() falló: {e}")
         
         if self._orbe is not None:
             try:
                 self._orbe.mostrar()
-                print("[WebUI] orbe mostrado")
+                pass  # print("[WebUI] orbe mostrado")
             except Exception as e:
-                print(f"[WebUI] Error mostrando orbe: {e}")
+                pass  # print(f"[WebUI] Error mostrando orbe: {e}")
 
     def ocultar_ventana(self):
-        print("[WebUI] ocultar_ventana() llamado — delegando a colapsar()")
+        pass  # print("[WebUI] ocultar_ventana() llamado — delegando a colapsar()")
         self.colapsar()
 
 def _crear_ventana_y_arrancar(orbe_existente=None):
@@ -236,7 +241,7 @@ def _crear_ventana_y_arrancar(orbe_existente=None):
     )
 
     def _al_expandir_orbe():
-        print("[WebUI] Expandir orbe clickeado")
+        pass  # print("[WebUI] Expandir orbe clickeado")
         try:
             ox, oy = orbe.posicion
             # La esquina superior derecha del orbe es (ox + ORBE_CANVAS, oy)
@@ -244,19 +249,19 @@ def _crear_ventana_y_arrancar(orbe_existente=None):
             x = ox + orbe_tk.ORBE_CANVAS - 340
             y = oy
             window.move(max(0, x), max(0, y))
-            print(f"[WebUI] Ventana movida a {x},{y}")
+            pass  # print(f"[WebUI] Ventana movida a {x},{y}")
         except Exception as e:
-            print(f"[WebUI] Error moviendo ventana: {e}")
+            pass  # print(f"[WebUI] Error moviendo ventana: {e}")
         try:
             orbe.ocultar()
-            print("[WebUI] Orbe ocultado")
+            pass  # print("[WebUI] Orbe ocultado")
         except Exception as e:
-            print(f"[WebUI] Error ocultando orbe: {e}")
+            pass  # print(f"[WebUI] Error ocultando orbe: {e}")
         try:
             window.show()
-            print("[WebUI] Ventana mostrada")
+            pass  # print("[WebUI] Ventana mostrada")
         except Exception as e:
-            print(f"[WebUI] Error mostrando ventana: {e}")
+            pass  # print(f"[WebUI] Error mostrando ventana: {e}")
         
         try:
             window.evaluate_js("""
@@ -268,7 +273,7 @@ def _crear_ventana_y_arrancar(orbe_existente=None):
                 }
             """)
         except Exception as e:
-            print(f"[WebUI] Error expandiendo panel: {e}")
+            pass  # print(f"[WebUI] Error expandiendo panel: {e}")
 
     if orbe_existente is not None:
         orbe = orbe_existente

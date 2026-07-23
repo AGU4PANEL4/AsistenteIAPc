@@ -310,3 +310,430 @@ html, body {
   transition: color 0.2s ease;
 }
 .fila-item button:hover { color: var(--rojo); }
+
+/* ═══════════════════════════════════════════════════════════════════
+   ALIAS AGRUPADOS — NUEVO ESTILO
+   ═══════════════════════════════════════════════════════════════════ */
+.alias-grupo-cabecera {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  margin: 4px 0;
+  background: var(--bg);
+  border-radius: 8px;
+  border: 1px solid var(--borde);
+  cursor: pointer;
+  transition: background 0.2s ease, border-color 0.2s ease;
+}
+.alias-grupo-cabecera:hover {
+  background: #142d33;
+  border-color: var(--acento);
+}
+.alias-grupo-toggle {
+  font-size: 10px;
+  color: var(--acento);
+  width: 14px;
+  text-align: center;
+  transition: transform 0.2s ease;
+}
+.alias-grupo-nombre {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--texto);
+  flex: 1;
+}
+.alias-grupo-conteo {
+  font-size: 9px;
+  font-family: var(--mono);
+  color: var(--texto-dim);
+  background: var(--bg2);
+  padding: 2px 6px;
+  border-radius: 6px;
+}
+
+.alias-grupo-lista {
+  padding-left: 8px;
+  margin-bottom: 8px;
+  animation: fadeIn 0.2s ease;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.alias-fila {
+  margin-bottom: 4px;
+  border-left: 2px solid var(--acento);
+  border-radius: 0 6px 6px 0;
+}
+.alias-fila .txt {
+  font-family: var(--mono);
+  font-size: 9px;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   CONFIRMACIÓN DE BORRADO
+   ═══════════════════════════════════════════════════════════════════ */
+
+/* Primer click: fila resaltada en rojo tenue */
+.fila-item.confirmar-borrado {
+  background: rgba(255, 85, 102, 0.12);
+  border: 1px solid rgba(255, 85, 102, 0.35);
+  animation: pulso-confirmar 1.2s ease-in-out infinite;
+}
+
+@keyframes pulso-confirmar {
+  0%, 100% { border-color: rgba(255, 85, 102, 0.25); box-shadow: 0 0 0 rgba(255, 85, 102, 0); }
+  50% { border-color: rgba(255, 85, 102, 0.6); box-shadow: 0 0 8px rgba(255, 85, 102, 0.15); }
+}
+
+/* Botón de borrar */
+.btn-borrar {
+  background: none;
+  border: none;
+  color: var(--texto-dim);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  transition: all 0.2s ease;
+  line-height: 1;
+}
+
+.btn-borrar:hover {
+  color: var(--rojo);
+  background: rgba(255, 85, 102, 0.08);
+}
+
+/* En modo confirmación: el botón se ve más "peligroso" */
+.confirmar-borrado .btn-borrar {
+  color: var(--rojo);
+  background: rgba(255, 85, 102, 0.15);
+  font-size: 14px;
+}
+
+.confirmar-borrado .btn-borrar:hover {
+  background: rgba(255, 85, 102, 0.3);
+  transform: scale(1.1);
+}
+
+/* Animación de desvanecimiento al eliminar */
+.fila-item.desvaneciendo {
+  animation: desvanecer 0.25s ease forwards;
+  pointer-events: none;
+}
+
+@keyframes desvanecer {
+  0%   { opacity: 1; transform: scale(1); }
+  50%  { opacity: 0.5; transform: scale(0.98); }
+  100% { opacity: 0; transform: scale(0.95); max-height: 0; padding: 0; margin: 0; border: none; }
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════
+   ORBE INTERACTIVO — hover y tracking de ojos
+   ═══════════════════════════════════════════════════════════════════ */
+
+#orbe-circulo {
+  cursor: pointer;
+  transition: transform 0.3s ease, box-shadow 0.3s ease;
+}
+
+#orbe-circulo:hover {
+  transform: scale(1.06);
+}
+
+#orbe-circulo:active {
+  transform: scale(0.98);
+}
+
+/* Brillo de ojos al hover */
+#brillo-izq, #brillo-der {
+  transition: opacity 0.2s ease;
+}
+
+/* Pupilas con transición suave */
+#pupila-izq, #pupila-der {
+  transition: r 0.2s ease;
+}
+
+#orbe-circulo:hover #pupila-izq,
+#orbe-circulo:hover #pupila-der {
+  r: 2.3;
+}
+
+/* Boca sorpresa */
+#boca-sorpresa {
+  transition: opacity 0.2s ease;
+}
+/* =====================================================================
+   FIX: Color de métricas .val (wake word, etc.)
+   ===================================================================== */
+.metrica .val {
+  color: var(--texto);
+}
+
+/* =====================================================================
+   ANIMACIONES IDLE — keyframes (solo transform y opacity, 100% confiables)
+   ===================================================================== */
+
+/* --- Inactivo --- */
+@keyframes slow-blink-anim {
+  0%   { opacity: 1; }
+  30%  { opacity: 1; }
+  45%  { opacity: 0; }
+  65%  { opacity: 0; }
+  80%  { opacity: 1; }
+  100% { opacity: 1; }
+}
+
+@keyframes look-around-ojos {
+  0%   { transform: translateX(0); }
+  20%  { transform: translateX(-3px); }
+  40%  { transform: translateX(3px); }
+  60%  { transform: translateX(-1px); }
+  80%  { transform: translateX(0); }
+  100% { transform: translateX(0); }
+}
+
+/* --- Escuchando --- */
+@keyframes alert-scan-ojos {
+  0%   { transform: translateX(0); }
+  15%  { transform: translateX(-4px); }
+  30%  { transform: translateX(4px); }
+  45%  { transform: translateX(-3px); }
+  60%  { transform: translateX(3px); }
+  75%  { transform: translateX(0); }
+  100% { transform: translateX(0); }
+}
+
+@keyframes focus-nod-orbe {
+  0%   { transform: scale(1) translateY(0); }
+  25%  { transform: scale(1.03) translateY(-2px); }
+  50%  { transform: scale(1.01) translateY(0); }
+  75%  { transform: scale(1.03) translateY(-2px); }
+  100% { transform: scale(1) translateY(0); }
+}
+
+/* --- Procesando --- */
+@keyframes think-wave {
+  0%   { d: path("M 44 55 Q 48 53 52 55"); }
+  25%  { d: path("M 44 55 Q 48 57 52 55"); }
+  50%  { d: path("M 44 55 Q 48 52 52 55"); }
+  75%  { d: path("M 44 55 Q 48 58 52 55"); }
+  100% { d: path("M 44 55 Q 48 55 52 55"); }
+}
+
+@keyframes look-up-ojos {
+  0%   { transform: translateY(0); }
+  30%  { transform: translateY(-3px); }
+  50%  { transform: translateY(-4px); }
+  70%  { transform: translateY(-2px); }
+  100% { transform: translateY(0); }
+}
+
+/* --- Hablando --- */
+@keyframes content-sigh {
+  0%   { d: path("M 42 53 Q 48 59 54 53"); }
+  30%  { d: path("M 40 52 Q 48 65 56 52"); }
+  50%  { d: path("M 40 52 Q 48 65 56 52"); }
+  70%  { d: path("M 42 53 Q 48 61 54 53"); }
+  100% { d: path("M 42 53 Q 48 59 54 53"); }
+}
+
+@keyframes happy-bounce-orbe {
+  0%   { transform: scale(1); }
+  30%  { transform: scale(1.04); }
+  50%  { transform: scale(0.98); }
+  70%  { transform: scale(1.02); }
+  100% { transform: scale(1); }
+}
+
+/* --- Buscando --- */
+@keyframes scan-sweep-ojos {
+  0%   { transform: translateX(0); }
+  10%  { transform: translateX(-5px); }
+  25%  { transform: translateX(5px); }
+  40%  { transform: translateX(-4px); }
+  55%  { transform: translateX(4px); }
+  70%  { transform: translateX(-2px); }
+  85%  { transform: translateX(0); }
+  100% { transform: translateX(0); }
+}
+
+@keyframes search-pulse-glow {
+  0%   { box-shadow: 0 0 18px rgba(230,192,45,0.18); }
+  40%  { box-shadow: 0 0 30px rgba(230,192,45,0.40); }
+  60%  { box-shadow: 0 0 22px rgba(230,192,45,0.25); }
+  80%  { box-shadow: 0 0 35px rgba(230,192,45,0.45); }
+  100% { box-shadow: 0 0 18px rgba(230,192,45,0.18); }
+}
+
+/* --- Dormido --- */
+@keyframes deep-snore-z {
+  0%   { transform: scale(1); opacity: 0.5; }
+  40%  { transform: scale(1.6); opacity: 0.9; }
+  60%  { transform: scale(1.3); opacity: 0.7; }
+  100% { transform: scale(1); opacity: 0.5; }
+}
+
+@keyframes drowsy-peek-ojos {
+  0%   { opacity: 0; }
+  25%  { opacity: 0; }
+  40%  { opacity: 1; }
+  60%  { opacity: 1; }
+  75%  { opacity: 0.3; }
+  100% { opacity: 0; }
+}
+
+/* =====================================================================
+   ANIMACIÓN MAREO / DIZZY (cuando se arrastra rápido la ventana)
+   ===================================================================== */
+
+/* Espirales girando sobre sí mismas — el path rota alrededor de su centro */
+@keyframes dizzy-spiral-spin {
+  0%   { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+@keyframes dizzy-spiral-spin-der {
+  0%   { transform: rotate(0deg); }
+  100% { transform: rotate(-360deg); }
+}
+
+/* Wobble del orbe entero (efecto mareo) */
+@keyframes dizzy-wobble {
+  0%   { transform: translate(0, 0) rotate(0deg); }
+  15%  { transform: translate(-2px, 1px) rotate(-2deg); }
+  30%  { transform: translate(2px, -1px) rotate(2deg); }
+  45%  { transform: translate(-1px, 2px) rotate(-1deg); }
+  60%  { transform: translate(1px, -2px) rotate(1deg); }
+  75%  { transform: translate(-2px, -1px) rotate(-2deg); }
+  90%  { transform: translate(2px, 1px) rotate(2deg); }
+  100% { transform: translate(0, 0) rotate(0deg); }
+}
+
+/* =====================================================================
+   CLASES DE ANIMACIÓN IDLE
+   ===================================================================== */
+
+/* Inactivo */
+.idle-slow-blink #ojos-abiertos {
+  animation: slow-blink-anim 2.5s ease-in-out;
+}
+.idle-look-around #ojos-abiertos {
+  animation: look-around-ojos 2.2s ease-in-out;
+}
+
+/* Escuchando */
+.idle-alert-scan #ojos-abiertos {
+  animation: alert-scan-ojos 1.5s ease-in-out;
+}
+.idle-focus-nod #orbe-circulo {
+  animation: focus-nod-orbe 1.8s ease-in-out;
+}
+
+/* Procesando */
+.idle-think-wave #boca-neutra {
+  animation: think-wave 2s ease-in-out;
+}
+.idle-look-up #ojos-abiertos {
+  animation: look-up-ojos 2s ease-in-out;
+}
+
+/* Hablando */
+.idle-content-sigh #boca-hablando {
+  animation: content-sigh 2.5s ease-in-out;
+}
+.idle-happy-bounce #orbe-circulo {
+  animation: happy-bounce-orbe 1.2s ease-in-out;
+}
+
+/* Buscando */
+.idle-scan-sweep #ojos-abiertos {
+  animation: scan-sweep-ojos 1.5s ease-in-out;
+}
+.idle-search-pulse #orbe-circulo {
+  animation: search-pulse-glow 2s ease-in-out;
+}
+
+/* Dormido */
+.idle-deep-snore #z-flotantes {
+  animation: deep-snore-z 2.5s ease-in-out;
+}
+.idle-drowsy-peek #ojos-cerrados {
+  opacity: 0;
+  transition: opacity 0.4s ease;
+}
+.idle-drowsy-peek #ojos-drowsy {
+  display: block !important;
+  animation: drowsy-peek-ojos 3s ease-in-out;
+}
+
+/* =====================================================================
+   CLASES DE ANIMACIÓN MAREO (se aplican al #orbe-wrap)
+   ===================================================================== */
+
+/* Estado: mareo activo — muestra espirales, oculta ojos normales, wobble */
+.dizzy-active #ojos-abiertos,
+.dizzy-active #ojos-cerrados,
+.dizzy-active #ojos-drowsy {
+  display: none !important;
+}
+.dizzy-active #ojos-spiral {
+  display: block !important;
+}
+.dizzy-active #spiral-izq {
+  animation: dizzy-spiral-spin 2.5s linear infinite;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+.dizzy-active #spiral-der {
+  animation: dizzy-spiral-spin-der 2.5s linear infinite;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+.dizzy-active #orbe-circulo {
+  animation: dizzy-wobble 0.6s ease-in-out;
+}
+
+/* Boca zigzag de mareo: ocultar las demás, mostrar la de dizzy */
+.dizzy-active #boca-neutra,
+.dizzy-active #boca-hablando,
+.dizzy-active #boca-escuchando,
+.dizzy-active #boca-dormido,
+.dizzy-active #boca-sonrisa {
+  display: none !important;
+}
+.dizzy-active #boca-dizzy {
+  display: block !important;
+}
+
+/* Colores de espiral y boca según estado */
+.dizzy-active.estado-escuchando #ojos-spiral path,
+.dizzy-active.estado-escuchando #boca-dizzy {
+  stroke: var(--acento);
+}
+.dizzy-active.estado-procesando #ojos-spiral path,
+.dizzy-active.estado-procesando #boca-dizzy {
+  stroke: var(--amarillo);
+}
+.dizzy-active.estado-buscando #ojos-spiral path,
+.dizzy-active.estado-buscando #boca-dizzy {
+  stroke: var(--amarillo);
+}
+.dizzy-active.estado-hablando #ojos-spiral path,
+.dizzy-active.estado-hablando #boca-dizzy {
+  stroke: var(--verde);
+}
+.dizzy-active.estado-dormido #ojos-spiral path,
+.dizzy-active.estado-dormido #boca-dizzy {
+  stroke: var(--dormido);
+}
+.dizzy-active.estado-inactivo #ojos-spiral path,
+.dizzy-active.estado-inactivo #boca-dizzy {
+  stroke: var(--texto-dim);
+}

@@ -477,14 +477,16 @@ def _loop_voz():
                 elif respuesta_libre and not ia_fallo:
                     # La IA ya incluyó la pregunta de cierre → solo hablamos lo que dijo
                     hablar(respuesta_libre, permitir_interrupcion=False)
-                    # Escuchamos brevemente porque la IA ya invitó a seguir
-                    from voice import escuchar_rapido
-                    respuesta_seguir = escuchar_rapido(timeout=3, phrase_time_limit=5)
-                    if respuesta_seguir:
-                        comando_pendiente = respuesta_seguir
+                    # FIX: NO escuchamos aquí — la IA ya invitó a seguir, y el loop
+                    # normal de escucha (escuchar_wake_word/escuchar) se encarga
+                    # de capturar la respuesta del usuario en la próxima iteración.
+                    # Escuchar "por la fuerza" aquí causaba que comandos dichos
+                    # durante la respuesta de la IA se procesaran sin contexto.
                 else:
                     # Fallback o error
-                    comando_pendiente = hablar(
+                    # FIX: hablar() devuelve None, no tiene sentido asignarlo a
+                    # comando_pendiente. Se habla el mensaje y se continúa.
+                    hablar(
                         respuesta_libre or "No entendí qué quieres que haga, ¿podés repetirlo?",
                         permitir_interrupcion=not ia_fallo,
                     )
@@ -509,7 +511,9 @@ def _loop_voz():
 
             ultimo_comando = time.time()
 
-            comando_pendiente = hablar("¿Algo más?", permitir_interrupcion=True)
+            # FIX: hablar() devuelve None. No asignar a comando_pendiente.
+            # El loop normal de escucha se encarga de la siguiente interacción.
+            hablar("¿Algo más?", permitir_interrupcion=True)
             set_modo("escuchando")
             
         except Exception as e:
@@ -533,6 +537,9 @@ from main_web import _crear_ventana_y_arrancar
 # el gap entre splash y orbe)
 try:
     _crear_ventana_y_arrancar(orbe_existente=orbe)
+except KeyboardInterrupt:
+    # FIX: manejar Ctrl+C de forma limpia, sin mostrar error fatal
+    print("[Main] Interrupción por teclado (Ctrl+C). Cerrando...")
 except Exception as e:
     log.exception(f"Error en la interfaz web: {e}")
     _mostrar_error_fatal(

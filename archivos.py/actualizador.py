@@ -36,6 +36,7 @@ con la forma de avisar que tiene sentido para su contexto:
    esté revisando ningún estado compartido en su loop principal.
 """
 
+import os
 import sys
 import time
 import threading
@@ -221,54 +222,97 @@ def _descargar_exe(url, callback_progreso=None):
 # INSTALAR
 # =========================================================
 
-def _instalar_y_cerrar(ruta_exe):
+def _instalar_y_cerrar(ruta_exe, tag_nuevo=None):
     """
-    Ejecuta el instalador descargado, en modo SILENCIOSO y
-    automático, y cierra el asistente. El instalador de Inno Setup
-    corre de forma independiente, así que el asistente puede
-    cerrarse sin esperar a que termine.
+    FIX CRÍTICO (histórico): antes el flujo era:
+      1. subprocess.Popen(instalador)   → lanza el instalador async
+      2. time.sleep(2)                  → espera arbitraria
+      3. sys.exit(0)                    → MATA EL PROCESO
 
-    FIX/NUEVO: antes esto lanzaba el instalador SIN ningún flag, lo
-    que abría el wizard completo de Inno Setup (bienvenida, carpeta
-    de destino, tareas, página de "listo para instalar", página de
-    fin) — el usuario tenía que volver a pasar por TODO eso para lo
-    que se suponía era una actualización automática ya confirmada
-    antes (en el diálogo de preguntar_actualizar_gui). Ahora se usa:
+    El problema: sys.exit(0) cierra el proceso del asistente ANTES
+    de que el instalador de Inno Setup termine de reemplazar los
+    archivos. Como el asistente mismo es el proceso que tiene los
+    archivos .exe abiertos (está corriendo), el instalador necesita
+    que el proceso se cierre por su cuenta para poder reemplazarlos.
+    Con /CLOSEAPPLICATIONS, Inno Setup intenta cerrar el asistente
+    amablemente (WM_CLOSE), pero si el proceso se mata con sys.exit(0)
+    antes de que el instalador llegue a esa etapa, la instalación se
+    aborta o queda incompleta.
 
-      /VERYSILENT          -> sin ninguna ventana del wizard
-      /SUPPRESSMSGBOXES     -> los MsgBox del script (ver
-                               instalador.iss, InitializeSetup)
-                               responden con su valor por defecto en
-                               vez de esperar un clic que nunca va a
-                               llegar
-      /NORESTART            -> nunca reiniciar Windows solo
-      /CLOSEAPPLICATIONS     -> cierra automáticamente cualquier app
-                               que tenga abiertos los archivos a
-                               reemplazar (ver AppMutex/
-                               CloseApplications en instalador.iss)
-      /RESTARTAPPLICATIONS  -> reabre el asistente solo al terminar
-                               (ver el segundo [Run] en
-                               instalador.iss, condicionado a
-                               WizardSilent)
+    Además, /CLOSEAPPLICATIONS + /SUPPRESSMSGBOXES es peligroso: si
+    el asistente no responde al cierre amable en el tiempo que Inno
+    Setup espera, el MsgBox de "no se pudo cerrar la aplicación"
+    responde con "Abort" por defecto (comportamiento de
+    SUPPRESSMSGBOXES), CANCELANDO la instalación completamente.
 
-    FIX/NUEVO: además, justo antes de lanzar el instalador se libera
-    el mutex de instancia única (ver instancia.py) en vez de confiar
-    en que sys.exit(0) + el proceso muriendo del todo alcance a
-    tiempo. Antes era una carrera: si el proceso (con pygame,
-    faster-whisper, etc. cargados) tardaba más de lo esperado en
-    terminar de cerrarse, el instalador arrancaba y su chequeo
-    CheckForMutexes('AsistenteIA_Running') todavía encontraba el
-    mutex vivo, mostrando "el asistente parece estar corriendo,
-    ¿continuar de todas formas?" en medio de lo que debía ser 100%
-    automático. Liberando el mutex nosotros mismos, de forma
-    explícita, esto deja de depender de ningún timing.
+    El flujo correcto es:
+      1. Liberar mutex (para que el instalador no vea "instancia corriendo")
+      2. Apagar TODOS los subsistemas del asistente de forma ordenada
+         (TTS, micrófono, hilos, etc.) via apagar_todo_al_salir()
+      3. Lanzar el instalador SIN /CLOSEAPPLICATIONS (ya no hace falta,
+         porque nos cerramos nosotros) y SIN /RESTARTAPPLICATIONS (no
+         funciona si el instalador no fue quien nos cerró)
+      4. Guardar la versión instalada (recién ahora que estamos
+         seguros de que el instalador se lanzó correctamente)
+      5. Cerrar el proceso del asistente INMEDIATAMENTE con os._exit(0)
+         (más rápido y limpio que sys.exit, no ejecuta finally/atexit)
+
+    El instalador de Inno Setup, al no encontrar el .exe en ejecución
+    (porque ya nos cerramos), puede reemplazar los archivos
+    directamente sin necesidad de CloseApplications ni Restart Manager.
+
+    FIX (este cambio): faltaba `import os` a nivel de módulo — la
+    llamada a os._exit(0) al final de esta función lanzaba
+    NameError: name 'os' is not defined, capturado en silencio por
+    el except Exception de más abajo (solo un print/log, nunca
+    propagado). Resultado real observado: el instalador SÍ se
+    lanzaba (el subprocess.Popen de más abajo se ejecuta antes del
+    error), pero el asistente NUNCA se cerraba con os._exit(0) —
+    seguía vivo con los .exe/DLLs abiertos, así que Inno Setup no
+    podía reemplazarlos: la actualización se "descargaba e instalaba"
+    en apariencia, pero nada cambiaba nunca. Se agrega `import os`
+    al principio del archivo.
+
+    FIX (este cambio, 2/2): el docstring de
+    verificar_actualizacion_arranque() ya decía que la versión debía
+    guardarse "DENTRO de _instalar_y_cerrar(), justo antes de
+    os._exit(0)" — pero esa llamada a guardar_version_local() nunca
+    se había agregado de verdad acá. Se agrega el parámetro opcional
+    `tag_nuevo`: si se pasa, se guarda la versión ANTES de salir,
+    solo después de confirmar que el Popen del instalador no lanzó
+    ninguna excepción. Si _instalar_y_cerrar() falla antes de llegar
+    ahí, la versión NO se guarda y la próxima vez que arranque
+    volverá a ofrecer la actualización — igual que documentaba el
+    comentario original.
     """
     try:
         print(f"[Actualizador] Ejecutando instalador (silencioso): {ruta_exe}")
         log.info(f"Ejecutando instalador de actualización (silencioso): {ruta_exe}")
 
+        # 1. Liberar mutex para que el instalador no vea "instancia corriendo"
         from instancia import liberar as _liberar_mutex
         _liberar_mutex()
+
+        # 2. Apagar subsistemas ordenadamente (TTS, micrófono, modelos, etc.)
+        #    Esto libera todos los recursos que el instalador podría
+        #    necesitar reemplazar.
+        from gestor_ia import apagar_todo_al_salir
+        apagar_todo_al_salir()
+
+        # 3. Lanzar el instalador. SIN /CLOSEAPPLICATIONS (ya nos cerramos
+        #    nosotros), SIN /RESTARTAPPLICATIONS (no funciona si no nos
+        #    cerró el instalador). Se agrega /LOG para debug.
+        #    Se usa startupinfo para ocultar la ventana del instalador
+        #    completamente (incluso el flash inicial).
+        startupinfo = None
+        if hasattr(subprocess, "STARTUPINFO"):
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = subprocess.SW_HIDE
+
+        flags = 0
+        if hasattr(subprocess, "CREATE_NO_WINDOW"):
+            flags = subprocess.CREATE_NO_WINDOW
 
         subprocess.Popen(
             [
@@ -276,26 +320,31 @@ def _instalar_y_cerrar(ruta_exe):
                 "/VERYSILENT",
                 "/SUPPRESSMSGBOXES",
                 "/NORESTART",
-                "/CLOSEAPPLICATIONS",
-                "/RESTARTAPPLICATIONS",
+                "/LOG",  # Genera log en %TEMP% para debug si falla
             ],
-            creationflags=subprocess.CREATE_NO_WINDOW
-            if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
+            startupinfo=startupinfo,
+            creationflags=flags,
         )
 
-        # margen para que el instalador arranque y tome el control
-        # antes de que el proceso del asistente se cierre — se
-        # aumenta de 1s a 2s como colchón extra (el mutex ya se
-        # liberó arriba, así que esto ya NO es lo único que evita el
-        # falso aviso de "instancia corriendo", solo un margen extra
-        # de cortesía)
-        time.sleep(2)
+        # 4. Guardar la versión instalada — recién ahora que el
+        #    instalador se lanzó sin excepciones. Si algo de lo de
+        #    arriba hubiera fallado, no llegaríamos hasta acá y la
+        #    versión local seguiría siendo la vieja.
+        if tag_nuevo:
+            guardar_version_local(tag_nuevo)
 
-        sys.exit(0)
+        # 5. Cerrar el proceso AHORA. os._exit() es más rápido que
+        #    sys.exit() porque no ejecuta finally blocks ni atexit
+        #    handlers — justo lo que queremos, porque
+        #    apagar_todo_al_salir() YA se ejecutó arriba y no
+        #    queremos que se ejecute de nuevo.
+        print("[Actualizador] Cerrando asistente para completar la instalación...")
+        os._exit(0)
 
     except Exception as e:
         print(f"[Actualizador] No pude ejecutar el instalador: {e}")
         log.exception("Error ejecutando el instalador de actualización")
+        return False
 
 
 # =========================================================
@@ -319,7 +368,7 @@ def verificar_actualizacion_arranque(callback_progreso=None):
       False -> el asistente se está cerrando para instalar la
                actualización — quien llama debe detener el arranque
                de inmediato (en la práctica, _instalar_y_cerrar() ya
-               hizo sys.exit(0) antes de llegar a retornar esto; se
+               hizo os._exit(0) antes de llegar a retornar esto; se
                deja como resguardo por si esa llamada no llegara a
                cerrar el proceso por algún motivo).
     """
@@ -360,18 +409,10 @@ def verificar_actualizacion_arranque(callback_progreso=None):
     if callback_progreso:
         callback_progreso("Instalando actualización...")
 
-    # FIX: antes esto nunca se llamaba en el camino real de
-    # actualización (solo en la rama de "primera ejecución" más
-    # arriba) — config.json seguía con la versión VIEJA después de
-    # instalar, así que el próximo arranque (ya con el .exe nuevo)
-    # comparaba contra esa versión vieja, detectaba "hay una versión
-    # nueva" otra vez, y volvía a ofrecer instalar lo que ya se
-    # acababa de instalar — un bucle sin fin. Se guarda ACÁ, antes de
-    # instalar (después de esto el proceso se cierra con
-    # sys.exit(0), así que es el último punto posible para hacerlo).
-    guardar_version_local(tag_remoto)
-
-    _instalar_y_cerrar(ruta_exe)
+    # La versión se guarda DENTRO de _instalar_y_cerrar(), justo
+    # antes de os._exit(0), solo si el instalador se lanzó sin
+    # errores — ver el FIX documentado en esa función.
+    _instalar_y_cerrar(ruta_exe, tag_nuevo=tag_remoto)
     return False
 
 
@@ -385,6 +426,13 @@ def _flujo_manual_en_hilo(tag_remoto, url_exe):
     directamente para avisar y pedir confirmación. El asistente
     sigue respondiendo normalmente a otros comandos mientras esto
     descarga en background.
+
+    FIX: antes hablar() se usaba como si devolviera la respuesta del
+    usuario (respuesta = hablar(..., permitir_interrupcion=True)), pero
+    hablar() es TTS — solo habla, no escucha. El valor siempre era None,
+    así que caía al fallback de escuchar_confirmacion(). Esto funcionaba
+    por accidente pero era confuso. Ahora se habla primero y se escucha
+    después, de forma explícita.
     """
     from tts import hablar
     from voice import escuchar_confirmacion
@@ -396,22 +444,19 @@ def _flujo_manual_en_hilo(tag_remoto, url_exe):
         hablar("No pude descargar la actualización, intenta de nuevo más tarde")
         return
 
-    respuesta = hablar(
-        f"Ya descargué la actualización {tag_remoto}. ¿La instalo ahora?",
-        permitir_interrupcion=True,
-    )
-    if respuesta is None:
-        respuesta = escuchar_confirmacion(timeout=8)
+    # hablar() solo habla, no escucha. Separar en dos pasos explícitos.
+    hablar(f"Ya descargué la actualización {tag_remoto}. ¿La instalo ahora?")
+    respuesta = escuchar_confirmacion(timeout=8)
 
     if interpretar_confirmacion(respuesta, contexto="¿Instalo la actualización?") is True:
         hablar("Instalando, el asistente se va a cerrar")
-        # FIX: mismo motivo que en verificar_actualizacion_arranque —
-        # sin esto, el próximo arranque (ya con la versión nueva
-        # instalada) seguía comparando contra la versión vieja
-        # guardada en config.json y volvía a ofrecer la misma
-        # actualización que se acaba de instalar.
-        guardar_version_local(tag_remoto)
-        _instalar_y_cerrar(ruta_exe)
+        # La versión se guarda DENTRO de _instalar_y_cerrar(), justo
+        # antes de os._exit(0) — ver el FIX documentado ahí. Ya no
+        # hace falta llamar a guardar_version_local() acá aparte.
+        _instalar_y_cerrar(ruta_exe, tag_nuevo=tag_remoto)
+        # Si _instalar_y_cerrar retorna (no debería, hace os._exit),
+        # avisar que algo falló:
+        hablar("Hubo un problema con la instalación")
     else:
         hablar("Entendido, la instalaré en otro momento")
 
@@ -441,28 +486,16 @@ def buscar_actualizacion_ahora(valor=None):
 
     tag_local = obtener_version_local()
 
-    # FIX/NUEVO: _hay_version_nueva() devuelve False cuando no hay
-    # versión local registrada (tag_local == "") — ver su propio
-    # comentario ("sin versión local registrada → siempre hay algo
-    # nuevo... ver el manejo de primera vez en cada camino"). Ese
-    # "manejo de primera vez" existía en
-    # verificar_actualizacion_arranque() (más arriba en este mismo
-    # archivo) pero NUNCA se agregó acá — así que este comando
-    # respondía "Ya tienes la última versión instalada" sin ninguna
-    # base real, y como tampoco registraba ninguna versión, el
-    # problema se repetía CADA VEZ que se pedía "busca
-    # actualizaciones", dejando el comando efectivamente roto para
-    # siempre en cualquier instalación que llegara a este código
-    # antes de que el chequeo automático del arranque llegara a
-    # registrar una versión (ej. primer arranque sin internet, y
-    # recién más tarde el usuario pide buscar actualizaciones por voz
-    # una vez que la conexión volvió). Mismo criterio que en
-    # verificar_actualizacion_arranque(): sin versión local, se
+    # _hay_version_nueva() devuelve False cuando no hay versión local
+    # registrada (tag_local == "") — ver su propio comentario ("sin
+    # versión local registrada → siempre hay algo nuevo... ver el
+    # manejo de primera vez en cada camino"). Ese "manejo de primera
+    # vez" existe en verificar_actualizacion_arranque() (más arriba
+    # en este mismo archivo) y también acá: sin versión local, se
     # asume que el .exe que se está corriendo YA es la última
     # release (no hay forma de saber lo contrario), se registra, y
-    # se informa como al día — pero ahora sí queda una versión
-    # guardada, así que la PRÓXIMA vez que se compare, la comparación
-    # ya es real.
+    # se informa como al día — así la PRÓXIMA vez que se compare, la
+    # comparación ya es real.
     if not tag_local:
         print(f"[Actualizador] Sin versión local registrada — registrando versión actual: {tag_remoto}")
         guardar_version_local(tag_remoto)

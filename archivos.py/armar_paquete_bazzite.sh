@@ -50,6 +50,18 @@ if [ ! -f "$ORIGEN/instalador_bazzite.sh" ] || [ ! -f "$ORIGEN/desinstalador_baz
     exit 1
 fi
 
+# FIX: sin la carpeta web/ (panel.html, panel.css, panel.js) main.py
+# arranca pero main_web.py no puede abrir la interfaz — pywebview tira
+# 404 Not Found buscando panel.html, porque antes esta carpeta nunca se
+# copiaba al paquete (mismo bug que tenía asistente.spec en Windows
+# antes de declararla en datas). Se valida acá, temprano, para fallar
+# con un mensaje claro en tu máquina en vez de que tu amigo instale todo
+# y recién ahí, al abrir el panel, se encuentre con el error.
+if [ ! -d "$ORIGEN/web" ]; then
+    error "No encuentro la carpeta web/ (panel.html, panel.css, panel.js) en '$ORIGEN'."
+    exit 1
+fi
+
 # =========================================================
 # 1. ARMAR EL PAQUETE (.tar.gz) CON TODO LO NECESARIO
 # =========================================================
@@ -68,6 +80,17 @@ rm -f "$CARPETA_TMP/test.py"
 cp "$ORIGEN/requirements.txt" "$CARPETA_TMP/"
 cp "$ORIGEN/instalador_bazzite.sh" "$CARPETA_TMP/"
 cp "$ORIGEN/desinstalador_bazzite.sh" "$CARPETA_TMP/"
+
+# FIX/NUEVO: main.py arranca main_web.py sin importar si corre
+# compilado o directo con Python — necesita la carpeta web/ completa
+# (panel.html, panel.css, panel.js) para que pywebview tenga qué
+# mostrar, y asistente-ia.ico/.png como ícono de ventana y de bandeja.
+# Antes solo se copiaban los .py sueltos, así que del lado de tu amigo
+# esto faltaba por completo y el panel tiraba 404 Not Found al
+# expandirse — mismo bug que ya arreglamos en asistente.spec (Windows).
+cp -r "$ORIGEN/web" "$CARPETA_TMP/"
+cp "$ORIGEN/asistente-ia.ico" "$CARPETA_TMP/"
+cp "$ORIGEN/asistente-ia.png" "$CARPETA_TMP/"
 
 ARCHIVO_TAR="$CARPETA_TMP.tar.gz"
 tar czf "$ARCHIVO_TAR" -C "$CARPETA_TMP" .
